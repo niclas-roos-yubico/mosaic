@@ -31,7 +31,9 @@ You can customize the server behavior with the following command-line flags:
 -   `--cache-ttl <duration>`: Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s.
 -   `--cert <path>`: Path to a TLS certificate file to enable HTTPS.
 -   `--key <path>`: Path to a TLS private key file to enable HTTPS.
--   `--schema-match-headers`: Comma-separated list of headers to match against schema names for multi-tenant access control (e.g., `X-Tenant-Id,verified-user-id`).
+-   `--platform-session-jwks-url`: URL of the platform session JWKS endpoint (e.g. `http://platform-svc/.well-known/jwks.json`). **Required** — the server refuses to start without it. Used to validate the `X-Platform-Session` JWT on every query (see Schema Access Control below).
+-   `--platform-jwt-iss`: Expected `iss` for session JWTs. Defaults to `https://<umbrella-host>/platform`. Must match the token minter.
+-   `--platform-jwt-alg`: Expected signing algorithm for session JWTs (`RS256` or `ES256`). Defaults to `RS256`. `none` and HMAC algorithms are always rejected.
 -   `--load-extensions`: Comma-separated list of extensions to install and load at startup. Use a pipe after the extension name to specify the repository. Unspecified repositories will default to 'core'. (e.g. `mysql_scanner,netquack|community,aws|core_nightly`
 -   `--function-blocklist`: Comma-separated list of functions to block, useful for blocking functions that may pose security or performance risks. (e.g., 'bigquery_query,read_parquet')`
 
@@ -44,23 +46,26 @@ mkcert -install # Install mkcert CA
 mkcert localhost # create localhost.pem and localhost-key.pem
 ```
 
-### Multi-Tenant Access Control
+### Schema Access Control (session-JWT enforcement)
 
-`schema-match-headers` isn't part of the mosaic server API, but is provided here as an example of how to have
-multiple users / customers share the same DuckDB server instance while keeping their data isolated.
+This fork replaces the upstream `--schema-match-headers` mechanism (which trusted raw request
+headers) with validation of a signed **session JWT**. Every query must carry an `X-Platform-Session`
+header containing a JWT; the server validates it against the configured JWKS and enforces the token's
+`allowed_schemas` claim via the existing AST validator.
 
-1. **Client side**: set `preagg.schema` when calling `new Coordinator` ([docs](https://idl.uw.edu/mosaic/api/core/coordinator.html#constructor)) to
-   something like a tenant id, user id, or organization id. If you want results to be shared across users, you should
-   use tenant ids or organization ids, not user ids. Mosaic will use that value as the schema name for any temporary
-   tables with pre-aggregated data. Note that any of your own queries for preloading data will also need to use that schema name.
-2. **Authentication**: This implementation assumes that there is some authentication mechanism in place that sets the
-   trusted authentication headers in the request. The server will use these headers to determine which schema
-   to use for the query. This might be a server-side cookie sent through with mosaic requests, or a header set on outbound
-   requests from the client, which are verified in an api gateway or server middleware before reaching the DuckDB server.
-3. **Server side**: Start the server with `--schema-match-headers=X-Tenant-Id,verified-user-id`, or whatever headers
-   you trust to match against schema names. Inbound requests will be checked for these headers, and if they are present,
-   the server will allow access to any schemas that match the header values. If no headers are present, and `--schema-match-headers`
-   is set, the server will return a 401 Unauthorized error.
+1. **Client / gateway side**: a trusted minter issues a short-lived JWT with an `allowed_schemas`
+   claim (the schemas the caller may read), plus standard `iss`/`aud`/`exp`/`nbf`/`sub`/`jti` claims.
+   The JWT is forwarded to this server in the `X-Platform-Session` request header on every query.
+2. **Server side**: start the server with `--platform-session-jwks-url` (required), and optionally
+   `--platform-jwt-iss` / `--platform-jwt-alg`. On each request the server:
+   - fetches and caches the JWKS (conditional GET; refreshes on `kid` miss; **fails closed** if the
+     JWKS is unreachable on first use),
+   - verifies the signature and validates `iss`, `aud` (`platform-data-plane`), `exp`, `nbf` (≤60s
+     clock skew), and rejects `none`/HMAC algorithms,
+   - extracts `allowed_schemas` and passes it to the AST validator.
+3. **Responses**: a missing/invalid/expired token returns **401** `{"error":"unauthenticated"}`.
+   A query referencing a schema outside `allowed_schemas` returns **403**
+   `{"error":"schema_forbidden","details":"<schema>"}`. The `X-Platform-Session` value is never logged.
 
 ## API
 

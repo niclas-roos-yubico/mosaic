@@ -41,7 +41,7 @@ func main() {
 		// Use a temporary logger since the slog logger is set up below; print to stderr directly.
 		// We check early to fail fast before any resource allocation.
 		fmt.Fprintln(os.Stderr, "main: --platform-session-jwks-url is required")
-		return
+		os.Exit(1)
 	}
 
 	var functionBlocklist []string

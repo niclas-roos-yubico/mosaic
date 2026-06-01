@@ -124,7 +124,9 @@ func (s *Server) validateSessionJWT(r *http.Request) ([]string, error) {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	allowedSchemas, err := s.validateSessionJWT(r)
 	if err != nil {
-		http.Error(w, `{"error":"unauthenticated"}`, http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthenticated"}`))
 		return
 	}
 

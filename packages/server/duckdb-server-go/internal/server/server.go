@@ -30,16 +30,35 @@ type QueryParams struct {
 	Name    *string  `json:"name"`
 }
 
+// schemaForbiddenError is returned when a query references a schema outside allowed_schemas.
+type schemaForbiddenError struct {
+	Schema string
+}
+
+func (e *schemaForbiddenError) Error() string {
+	return fmt.Sprintf("schema_forbidden: %s", e.Schema)
+}
+
+// forbiddenBody is the contract §2.4 response body.
+type forbiddenBody struct {
+	Error   string `json:"error"`
+	Details string `json:"details"`
+}
+
+// Server handles HTTP and WebSocket requests, validating session JWTs and enforcing schema access.
 type Server struct {
 	*http.ServeMux
 
-	db                 *query.DB
-	schemaMatchHeaders []string // list of headers to match against schema names for multi-tenant access control
+	db           *query.DB
+	jwtValidator *JWTValidator // nil in tests that don't need a real DB
 
 	logger *slog.Logger
 }
 
-func New(db *query.DB, schemaMatchHeaders []string, logger *slog.Logger) *Server {
+// NewWithJWTValidator constructs the server with JWT-based schema enforcement.
+// db may be nil in tests that only exercise the auth layer.
+// validator is required for production; if nil the server rejects all requests.
+func NewWithJWTValidator(db *query.DB, validator *JWTValidator, logger *slog.Logger) *Server {
 	mux := http.NewServeMux()
 
 	if logger == nil {
@@ -47,10 +66,10 @@ func New(db *query.DB, schemaMatchHeaders []string, logger *slog.Logger) *Server
 	}
 
 	s := &Server{
-		ServeMux:           mux,
-		db:                 db,
-		schemaMatchHeaders: schemaMatchHeaders,
-		logger:             logger,
+		ServeMux:     mux,
+		db:           db,
+		jwtValidator: validator,
+		logger:       logger,
 	}
 
 	mux.Handle("/", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,11 +101,31 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// validateSessionJWT reads X-Platform-Session from the request, validates it, and returns
+// the allowed_schemas on success. Returns (nil, error) on any failure.
+// IMPORTANT: This function MUST NOT log the X-Platform-Session value (§12 redaction).
+func (s *Server) validateSessionJWT(r *http.Request) ([]string, error) {
+	if s.jwtValidator == nil {
+		return nil, fmt.Errorf("jwt validator not configured")
+	}
+	token := r.Header.Get("X-Platform-Session")
+	if token == "" {
+		return nil, fmt.Errorf("missing X-Platform-Session header")
+	}
+	claims, err := s.jwtValidator.Validate(r.Context(), token)
+	if err != nil {
+		// Log the failure without the token value (§12 redaction).
+		s.logger.Warn("server: session JWT validation failed", "error", err)
+		return nil, err
+	}
+	return claims.AllowedSchemas, nil
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	allowedSchemas := getAllowedSchemas(r, s.schemaMatchHeaders)
-	if len(s.schemaMatchHeaders) > 0 && len(allowedSchemas) == 0 {
-		s.logger.Error("server: no allowed schemas found in request headers", "headers", s.schemaMatchHeaders)
-		http.Error(w, "no allowed schemas found in request headers", http.StatusUnauthorized)
+	allowedSchemas, err := s.validateSessionJWT(r)
+	if err != nil {
+		s.logger.Error("server: websocket auth failed", "error", err)
+		http.Error(w, `{"error":"unauthenticated"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -115,7 +154,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// only return an error if you want to close the connection, which we do on any write errors, but not on command errors
+// only return an error if you want to close the connection
 func (s *Server) handleWebSocketMessage(ctx context.Context, conn *websocket.Conn, allowedSchemas []string) error {
 	var params QueryParams
 	err := wsjson.Read(ctx, conn, &params)
@@ -125,11 +164,19 @@ func (s *Server) handleWebSocketMessage(ctx context.Context, conn *websocket.Con
 
 	data, _, err := s.execCommand(context.TODO(), params, allowedSchemas)
 	if err != nil {
+		var sfErr *schemaForbiddenError
+		if errors.As(err, &sfErr) {
+			body, _ := json.Marshal(forbiddenBody{Error: "schema_forbidden", Details: sfErr.Schema})
+			writeErr := conn.Write(ctx, websocket.MessageText, body)
+			if writeErr != nil {
+				return fmt.Errorf("server: failed to write forbidden response: %w", writeErr)
+			}
+			return nil
+		}
 		writeErr := wsjson.Write(ctx, conn, map[string]string{"error": err.Error()})
 		if writeErr != nil {
 			return fmt.Errorf("server: failed to write error response: %w", writeErr)
 		}
-
 		return nil
 	}
 
@@ -153,7 +200,6 @@ func (s *Server) handleWebSocketMessage(ctx context.Context, conn *websocket.Con
 		}
 
 	default:
-		// should have been caught by validation
 		panic("server: unknown command type:" + *params.Type)
 	}
 
@@ -161,16 +207,15 @@ func (s *Server) handleWebSocketMessage(ctx context.Context, conn *websocket.Con
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	allowedSchemas := getAllowedSchemas(r, s.schemaMatchHeaders)
-	if len(s.schemaMatchHeaders) > 0 && len(allowedSchemas) == 0 {
-		s.logger.Error("server: no allowed schemas found in request headers", "headers", s.schemaMatchHeaders)
-		http.Error(w, "no allowed schemas found in request headers", http.StatusUnauthorized)
+	allowedSchemas, err := s.validateSessionJWT(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthenticated"})
 		return
 	}
 
 	var params QueryParams
-
-	// we support both POST and GET methods for the same endpoint
 
 	switch r.Method {
 	case http.MethodPost:
@@ -190,7 +235,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			cmd := Command(queryType)
 			params.Type = &cmd
 		}
-
 		if sqlQuery != "" {
 			params.SQL = &sqlQuery
 		}
@@ -203,6 +247,18 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	data, cacheHit, err := s.execCommand(r.Context(), params, allowedSchemas)
 	if err != nil {
+		var sfErr *schemaForbiddenError
+		if errors.As(err, &sfErr) {
+			// §12: log denied query attempt (SQL is logged; token is NEVER logged).
+			s.logger.Warn("server: query denied — schema_forbidden",
+				"schema", sfErr.Schema,
+				"sql_preview", sqlPreview(params),
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(forbiddenBody{Error: "schema_forbidden", Details: sfErr.Schema})
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -216,31 +272,22 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if cacheHit {
 			w.Header().Set("Cache-Status", "mosaic-duckdb-go; hit")
 		}
-
 		_, err = w.Write(data)
 		if err != nil {
 			s.logger.Error("server: failed to write Arrow data", "error", err)
-			return
 		}
-
-		return
 
 	case CommandJSON:
 		w.Header().Set("Content-Type", "application/json")
 		if cacheHit {
 			w.Header().Set("Cache-Status", "mosaic-duckdb-go; hit")
 		}
-
 		_, err = w.Write(data)
 		if err != nil {
 			s.logger.Error("server: failed to write JSON data", "error", err)
-			return
 		}
 
-		return
-
 	default:
-		// should have been caught by validation
 		panic("server: unknown command type:" + *params.Type)
 	}
 }
@@ -251,7 +298,6 @@ func (s *Server) execCommand(ctx context.Context, params QueryParams, allowedSch
 		return nil, false, err
 	}
 
-	// useCache is false by default, unless explicitly set to true
 	useCache := false
 	if params.Persist != nil {
 		useCache = *params.Persist
@@ -259,16 +305,24 @@ func (s *Server) execCommand(ctx context.Context, params QueryParams, allowedSch
 
 	switch *params.Type {
 	case CommandExec:
-		return nil, false, s.db.Exec(ctx, *params.SQL) // No data to return for exec command
+		// exec commands do not carry an AST suitable for schema-enforcement; they pass through.
+		return nil, false, s.db.Exec(ctx, *params.SQL)
 
 	case CommandArrow:
-		return s.db.QueryArrow(ctx, *params.SQL, allowedSchemas, useCache)
+		data, hit, qErr := s.db.QueryArrow(ctx, *params.SQL, allowedSchemas, useCache)
+		if qErr != nil {
+			return nil, false, wrapSchemaError(qErr)
+		}
+		return data, hit, nil
 
 	case CommandJSON:
-		return s.db.QueryJSON(ctx, *params.SQL, allowedSchemas, useCache)
+		data, hit, qErr := s.db.QueryJSON(ctx, *params.SQL, allowedSchemas, useCache)
+		if qErr != nil {
+			return nil, false, wrapSchemaError(qErr)
+		}
+		return data, hit, nil
 
 	default:
-		// should have been caught by validation
 		panic("server: unknown command type:" + *params.Type)
 	}
 }
@@ -294,15 +348,52 @@ func (p QueryParams) Validate(logger *slog.Logger) error {
 	return nil
 }
 
-func getAllowedSchemas(req *http.Request, schemaMatchHeaders []string) []string {
-	var allowedSchemas []string
-
-	for _, matchHeader := range schemaMatchHeaders {
-		allowedSchema := req.Header.Get(matchHeader)
-		if allowedSchema != "" {
-			allowedSchemas = append(allowedSchemas, allowedSchema)
-		}
+// wrapSchemaError detects schema-access errors from the query layer and wraps them
+// in a schemaForbiddenError so the server can return the correct 403 body.
+// The query layer uses two error message prefixes (internal/query/validator.go):
+//   - "access denied: unauthorized access to schema '%v'" (line 201)
+//   - "access denied: unauthorized access to table '%v' with empty schema" (line 196)
+//
+// Both are schema-access denials and are wrapped into schemaForbiddenError.
+func wrapSchemaError(err error) error {
+	if err == nil {
+		return nil
 	}
+	msg := err.Error()
+	if strings.Contains(msg, "access denied: unauthorized access to schema") {
+		// Format: "... access denied: unauthorized access to schema '<schema_name>'"
+		schema := extractSchemaFromError(msg, "unauthorized access to schema ")
+		return &schemaForbiddenError{Schema: schema}
+	}
+	if strings.Contains(msg, "access denied: unauthorized access to table") &&
+		strings.Contains(msg, "with empty schema") {
+		// Format: "... access denied: unauthorized access to table '<table_name>' with empty schema"
+		details := extractSchemaFromError(msg, "unauthorized access to table ")
+		return &schemaForbiddenError{Schema: details}
+	}
+	return err
+}
 
-	return allowedSchemas
+// extractSchemaFromError extracts the relevant detail string from a schema-access
+// denial error. It returns the portion of msg that follows the given prefix,
+// or the full msg if the prefix is not found.
+func extractSchemaFromError(msg, prefix string) string {
+	idx := strings.Index(msg, prefix)
+	if idx < 0 {
+		return msg
+	}
+	return strings.TrimSpace(msg[idx+len(prefix):])
+}
+
+// sqlPreview returns the first 200 characters of a SQL query for logging — safe to log
+// since this is query content, not a token. Truncated to avoid log bloat.
+func sqlPreview(params QueryParams) string {
+	if params.SQL == nil {
+		return ""
+	}
+	s := *params.SQL
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
 }

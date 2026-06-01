@@ -27,14 +27,21 @@ func main() {
 	ttlStr := flag.String("cache-ttl", "0s", "Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s.")
 	certFile := flag.String("cert", "", "Path to TLS certificate file (optional, enables HTTPS)")
 	keyFile := flag.String("key", "", "Path to TLS private key file (optional, enables HTTPS)")
-	schemaMatchHeadersStr := flag.String("schema-match-headers", "", "Comma-separated list of headers to match against schema names for multi-tenant access control (e.g., \"X-Tenant-Id,verified-user-id\")")
+	platformJwksURL := flag.String("platform-session-jwks-url", "",
+		"URL of the platform session JWKS endpoint (e.g. http://platform-svc/.well-known/jwks.json). Required.")
+	platformJwtIss := flag.String("platform-jwt-iss", "https://<umbrella-host>/platform",
+		"Expected issuer for Platform session JWTs. Must match the minter (WS-D).")
+	platformJwtAlg := flag.String("platform-jwt-alg", "RS256",
+		"Expected signing algorithm for Platform session JWTs (RS256 or ES256).")
 	extensionsStr := flag.String("load-extensions", "", "Comma-separated list of extensions to install and load at startup. Use a pipe after the extension name to specify the repository. Unspecified repositories will default to 'core'. (e.g. mysql_scanner,netquack|community,aws|core_nightly")
 	functionBlocklistStr := flag.String("function-blocklist", "", "Comma-separated list of functions to block, useful for blocking functions that may pose security or performance risks. (e.g., 'bigquery_query,read_parquet')")
 	flag.Parse()
 
-	var schemaMatchHeaders []string
-	if *schemaMatchHeadersStr != "" {
-		schemaMatchHeaders = strings.Split(*schemaMatchHeadersStr, ",")
+	if *platformJwksURL == "" {
+		// Use a temporary logger since the slog logger is set up below; print to stderr directly.
+		// We check early to fail fast before any resource allocation.
+		fmt.Fprintln(os.Stderr, "main: --platform-session-jwks-url is required")
+		return
 	}
 
 	var functionBlocklist []string
@@ -94,20 +101,33 @@ func main() {
 	}
 	defer db.Close()
 
-	s := server.New(db, schemaMatchHeaders, logger)
+	jwtValidator, err := server.NewJWTValidator(server.JWTValidatorConfig{
+		JWKSURL:    *platformJwksURL,
+		Issuer:     *platformJwtIss,
+		Audience:   "platform-data-plane",
+		Algorithms: []string{*platformJwtAlg},
+	})
+	if err != nil {
+		logger.Error("main: failed to create JWT validator", "error", err)
+		return
+	}
+
+	s := server.NewWithJWTValidator(db, jwtValidator, logger)
 
 	config := map[string]interface{}{
-		"database":             *dbPath,
-		"address":              *address,
-		"port":                 *port,
-		"connection_pool_size": *poolSize,
-		"cache_size":           *maxCacheEntries,
-		"cert_file":            *certFile,
-		"key_file":             *keyFile,
-		"schema_match_headers": *schemaMatchHeadersStr,
-		"ttl":                  ttl,
-		"max_cache_bytes":      *maxCacheBytes,
-		"load_extensions":      *extensionsStr,
+		"database":                   *dbPath,
+		"address":                    *address,
+		"port":                       *port,
+		"connection_pool_size":        *poolSize,
+		"cache_size":                 *maxCacheEntries,
+		"cert_file":                  *certFile,
+		"key_file":                   *keyFile,
+		"platform_session_jwks_url":  *platformJwksURL,
+		"platform_jwt_iss":           *platformJwtIss,
+		"platform_jwt_alg":           *platformJwtAlg,
+		"ttl":                        ttl,
+		"max_cache_bytes":            *maxCacheBytes,
+		"load_extensions":            *extensionsStr,
 	}
 	logger.Info("DuckDB Server configuration", "config", config)
 

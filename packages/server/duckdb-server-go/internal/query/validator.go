@@ -198,7 +198,7 @@ func (v *baseTableValidator) Validate() []error {
 		}
 
 		if !slices.Contains(v.allowedSchemas, baseTable.SchemaName) {
-			errs = append(errs, fmt.Errorf("access denied: unauthorized access to schema '%v'", baseTable))
+			errs = append(errs, fmt.Errorf("access denied: unauthorized access to schema '%s'", baseTable.SchemaName))
 		}
 	}
 

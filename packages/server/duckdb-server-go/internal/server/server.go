@@ -124,7 +124,6 @@ func (s *Server) validateSessionJWT(r *http.Request) ([]string, error) {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	allowedSchemas, err := s.validateSessionJWT(r)
 	if err != nil {
-		s.logger.Error("server: websocket auth failed", "error", err)
 		http.Error(w, `{"error":"unauthenticated"}`, http.StatusUnauthorized)
 		return
 	}
@@ -376,13 +375,19 @@ func wrapSchemaError(err error) error {
 
 // extractSchemaFromError extracts the relevant detail string from a schema-access
 // denial error. It returns the portion of msg that follows the given prefix,
-// or the full msg if the prefix is not found.
+// stripped of surrounding single quotes and any trailing suffix (e.g. " with empty schema").
+// Returns the full msg if the prefix is not found.
 func extractSchemaFromError(msg, prefix string) string {
 	idx := strings.Index(msg, prefix)
 	if idx < 0 {
 		return msg
 	}
-	return strings.TrimSpace(msg[idx+len(prefix):])
+	rest := strings.TrimSpace(msg[idx+len(prefix):])
+	// Strip the trailing " with empty schema" suffix if present (table variant).
+	rest = strings.TrimSuffix(rest, " with empty schema")
+	// Strip surrounding single quotes produced by the '%s' format verb.
+	rest = strings.Trim(rest, "'")
+	return rest
 }
 
 // sqlPreview returns the first 200 characters of a SQL query for logging — safe to log

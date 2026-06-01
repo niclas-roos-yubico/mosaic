@@ -333,3 +333,122 @@ func TestNotYetValid(t *testing.T) {
 		t.Fatal("expected error for not-yet-valid token, got nil")
 	}
 }
+
+// TestEmptyIssuerRejectedAtConstruction verifies Fix 4: NewJWTValidator returns
+// an error when Issuer is empty (not just at validation time).
+func TestEmptyIssuerRejectedAtConstruction(t *testing.T) {
+	_, err := server.NewJWTValidator(server.JWTValidatorConfig{
+		JWKSURL:  "http://example.com/.well-known/jwks.json",
+		Issuer:   "", // deliberately empty
+		Audience: "platform-data-plane",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty Issuer, got nil")
+	}
+}
+
+// TestNonKidErrorCausesExactlyOneFetch verifies Fix 3: a validation failure
+// that is NOT a kid-miss (here: expired token with a known kid) must NOT
+// trigger a second JWKS fetch. The counter must be exactly 1 after Validate.
+func TestNonKidErrorCausesExactlyOneFetch(t *testing.T) {
+	priv, jwksHandler := genTestKey(t)
+	fetchCount := 0
+	countingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		jwksHandler.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(countingHandler)
+	defer srv.Close()
+
+	v, err := server.NewJWTValidator(server.JWTValidatorConfig{
+		JWKSURL:    srv.URL,
+		Issuer:     "https://platform.example.com/platform",
+		Audience:   "platform-data-plane",
+		Algorithms: []string{"RS256"},
+	})
+	if err != nil {
+		t.Fatalf("NewJWTValidator: %v", err)
+	}
+
+	// Mint an already-expired token with the KNOWN kid ("test-kid-1").
+	// The kid exists in the JWKS so no refresh should be triggered;
+	// the failure is purely a time-based validation error.
+	token := mintToken(t, priv, "https://platform.example.com/platform", "platform-data-plane",
+		[]string{"bookings"}, -time.Hour, "test-kid-1")
+
+	_, err = v.Validate(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error for expired token, got nil")
+	}
+	if fetchCount != 1 {
+		t.Errorf("expected exactly 1 JWKS fetch for a non-kid error, got %d", fetchCount)
+	}
+}
+
+// TestDisallowedAlgorithmIsRejected verifies Fix 1: a token signed with an
+// algorithm that is outside the configured allowlist is rejected even if the
+// JWK's embedded algorithm matches the token header.
+func TestDisallowedAlgorithmIsRejected(t *testing.T) {
+	// Generate an RSA key pair and register it with RS512 in the JWKS.
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubKey, err := jwk.PublicRawKeyOf(priv)
+	if err != nil {
+		t.Fatalf("public raw key: %v", err)
+	}
+	set := jwk.NewSet()
+	k, err := jwk.Import(pubKey)
+	if err != nil {
+		t.Fatalf("jwk.Import: %v", err)
+	}
+	_ = k.Set(jwk.KeyIDKey, "test-kid-rs512")
+	_ = k.Set(jwk.AlgorithmKey, jwa.RS512()) // JWK says RS512
+	_ = k.Set(jwk.KeyUsageKey, jwk.ForSignature)
+	_ = set.AddKey(k)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		raw, _ := json.Marshal(set)
+		_, _ = w.Write(raw)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	// Validator only allows RS256 — RS512 must be rejected.
+	v, err := server.NewJWTValidator(server.JWTValidatorConfig{
+		JWKSURL:    srv.URL,
+		Issuer:     "https://platform.example.com/platform",
+		Audience:   "platform-data-plane",
+		Algorithms: []string{"RS256"},
+	})
+	if err != nil {
+		t.Fatalf("NewJWTValidator: %v", err)
+	}
+
+	// Mint a token signed with RS512.
+	tok := jwt.New()
+	_ = tok.Set(jwt.IssuerKey, "https://platform.example.com/platform")
+	_ = tok.Set(jwt.AudienceKey, []string{"platform-data-plane"})
+	_ = tok.Set(jwt.SubjectKey, "user123")
+	now := time.Now()
+	_ = tok.Set(jwt.IssuedAtKey, now)
+	_ = tok.Set(jwt.NotBeforeKey, now)
+	_ = tok.Set(jwt.ExpirationKey, now.Add(time.Hour))
+	_ = tok.Set(jwt.JwtIDKey, "jti-rs512")
+	_ = tok.Set("allowed_schemas", []string{"bookings"})
+
+	privKey, _ := jwk.Import(priv)
+	_ = privKey.Set(jwk.KeyIDKey, "test-kid-rs512")
+	_ = privKey.Set(jwk.AlgorithmKey, jwa.RS512())
+	signed, signErr := jwt.Sign(tok, jwt.WithKey(jwa.RS512(), privKey))
+	if signErr != nil {
+		t.Fatalf("jwt.Sign: %v", signErr)
+	}
+
+	_, err = v.Validate(context.Background(), string(signed))
+	if err == nil {
+		t.Fatal("expected error for token signed with disallowed algorithm RS512, got nil")
+	}
+}

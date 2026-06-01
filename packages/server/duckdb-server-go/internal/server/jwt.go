@@ -2,14 +2,18 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/lestrrat-go/jwx/v3/jwt"
 )
 
@@ -37,6 +41,7 @@ type JWTValidatorConfig struct {
 type JWTValidator struct {
 	cfg         JWTValidatorConfig
 	algSet      []jwa.SignatureAlgorithm
+	httpClient  *http.Client
 	mu          sync.RWMutex
 	cachedSet   jwk.Set
 	lastEtag    string
@@ -49,6 +54,9 @@ type JWTValidator struct {
 func NewJWTValidator(cfg JWTValidatorConfig) (*JWTValidator, error) {
 	if cfg.JWKSURL == "" {
 		return nil, fmt.Errorf("jwt: JWKSURL is required")
+	}
+	if cfg.Issuer == "" {
+		return nil, fmt.Errorf("jwt: Issuer is required")
 	}
 	if cfg.Audience == "" {
 		cfg.Audience = "platform-data-plane"
@@ -77,9 +85,10 @@ func NewJWTValidator(cfg JWTValidatorConfig) (*JWTValidator, error) {
 	}
 
 	return &JWTValidator{
-		cfg:      cfg,
-		algSet:   algSet,
-		cacheTTL: 5 * time.Minute,
+		cfg:        cfg,
+		algSet:     algSet,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		cacheTTL:   5 * time.Minute,
 	}, nil
 }
 
@@ -92,21 +101,47 @@ func (v *JWTValidator) Validate(ctx context.Context, tokenStr string) (*SessionC
 		return nil, fmt.Errorf("jwt: could not fetch JWKS (fail-closed): %w", err)
 	}
 
-	claims, err := v.parseAndValidate(ctx, tokenStr, keySet)
-	if err != nil {
-		// On any parse/verify failure, force a JWKS refresh and retry once.
-		// This handles the unknown-kid case: the token's kid is not in the
-		// current cache, so we must re-fetch the JWKS to pick up newly issued keys.
-		keySet, refreshErr := v.getKeySet(ctx, true) // force=true bypasses cache TTL
-		if refreshErr != nil {
-			return nil, fmt.Errorf("jwt: JWKS refresh failed (fail-closed): %w", refreshErr)
-		}
-		claims, err = v.parseAndValidate(ctx, tokenStr, keySet)
-		if err != nil {
-			return nil, err
+	// Only force a JWKS refresh when the token's kid is absent from the
+	// cached set (kid-not-found case). Any other validation error (expired,
+	// wrong aud/iss, bad signature) returns immediately — forcing a refresh
+	// on arbitrary failures would be a DoS amplification vector.
+	if kid, ok := tokenKid(tokenStr); ok {
+		if _, found := keySet.LookupKeyID(kid); !found {
+			// kid not in cache — re-fetch and retry once.
+			keySet, err = v.getKeySet(ctx, true) // force=true bypasses cache TTL
+			if err != nil {
+				return nil, fmt.Errorf("jwt: JWKS refresh failed (fail-closed): %w", err)
+			}
 		}
 	}
-	return claims, nil
+
+	return v.parseAndValidate(ctx, tokenStr, keySet)
+}
+
+// tokenKid extracts the "kid" field from the unverified JWT header.
+// It returns ("", false) if the compact token is malformed or has no kid.
+// No signature verification is performed — the kid is only used to drive
+// the cache-miss heuristic in Validate.
+func tokenKid(tokenStr string) (string, bool) {
+	parts := strings.SplitN(tokenStr, ".", 3)
+	if len(parts) < 2 {
+		return "", false
+	}
+	// JWT header is base64url-encoded without padding.
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	var hdr struct {
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(decoded, &hdr); err != nil {
+		return "", false
+	}
+	if hdr.Kid == "" {
+		return "", false
+	}
+	return hdr.Kid, true
 }
 
 // getKeySet returns the cached JWKS or fetches it.
@@ -152,7 +187,7 @@ func (v *JWTValidator) getKeySet(ctx context.Context, force bool) (jwk.Set, erro
 // fetchJWKS performs an HTTP GET to JWKSURL with optional If-None-Match.
 // Returns (nil, oldEtag, nil) on 304 Not Modified.
 func (v *JWTValidator) fetchJWKS(ctx context.Context, ifNoneMatch string) (jwk.Set, string, error) {
-	req, err := newHTTPRequestWithContext(ctx, "GET", v.cfg.JWKSURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", v.cfg.JWKSURL, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("jwt: build JWKS request: %w", err)
 	}
@@ -160,7 +195,7 @@ func (v *JWTValidator) fetchJWKS(ctx context.Context, ifNoneMatch string) (jwk.S
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
 
-	resp, err := defaultHTTPClient().Do(req)
+	resp, err := v.httpClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("jwt: JWKS fetch: %w", err)
 	}
@@ -170,10 +205,11 @@ func (v *JWTValidator) fetchJWKS(ctx context.Context, ifNoneMatch string) (jwk.S
 		return nil, ifNoneMatch, nil // not modified; caller uses cached set
 	}
 	if resp.StatusCode != 200 {
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, "", fmt.Errorf("jwt: JWKS fetch HTTP %d", resp.StatusCode)
 	}
 
-	newSet, parseErr := jwk.ParseReader(resp.Body)
+	newSet, parseErr := jwk.ParseReader(io.LimitReader(resp.Body, 4<<20))
 	if parseErr != nil {
 		return nil, "", fmt.Errorf("jwt: JWKS parse: %w", parseErr)
 	}
@@ -181,14 +217,73 @@ func (v *JWTValidator) fetchJWKS(ctx context.Context, ifNoneMatch string) (jwk.S
 	return newSet, newEtag, nil
 }
 
+// algEnforcingKeyProvider is a jws.KeyProvider that wraps a jwk.Set and
+// enforces an explicit algorithm allowlist. It rejects any key whose algorithm
+// is not in the allowlist, regardless of what the JWK says, so a token whose
+// header `alg` is outside the configured allowlist is rejected even if the JWK
+// itself nominally supports it.
+type algEnforcingKeyProvider struct {
+	set    jwk.Set
+	algSet []jwa.SignatureAlgorithm
+}
+
+func (p *algEnforcingKeyProvider) FetchKeys(_ context.Context, sink jws.KeySink, sig *jws.Signature, _ *jws.Message) error {
+	wantedKid, hasKid := sig.ProtectedHeaders().KeyID()
+	var key jwk.Key
+	var found bool
+	if hasKid {
+		key, found = p.set.LookupKeyID(wantedKid)
+		if !found {
+			return fmt.Errorf("failed to find key with key ID %q in key set", wantedKid)
+		}
+	} else {
+		if p.set.Len() != 1 {
+			return fmt.Errorf("no kid in token and key set has %d keys (expected exactly 1)", p.set.Len())
+		}
+		key, found = p.set.Key(0)
+		if !found {
+			return fmt.Errorf("failed to get key at index 0 (empty JWKS?)")
+		}
+	}
+
+	// Determine the algorithm from the JWK.
+	algVal, hasAlg := key.Algorithm()
+	if !hasAlg {
+		return fmt.Errorf("jwt: JWK has no algorithm set")
+	}
+	salg, ok := jwa.LookupSignatureAlgorithm(algVal.String())
+	if !ok {
+		return fmt.Errorf("jwt: JWK has unrecognised algorithm %q", algVal)
+	}
+
+	// Enforce the configured allowlist.
+	allowed := false
+	for _, a := range p.algSet {
+		if a == salg {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("jwt: algorithm %q is not in the configured allowlist", salg)
+	}
+
+	sink.Key(salg, key)
+	return nil
+}
+
 // parseAndValidate parses and validates the JWT against the provided key set.
+// Algorithm enforcement is applied via algEnforcingKeyProvider: a token whose
+// header `alg` is outside the configured allowlist is rejected regardless of
+// what the JWK says.
+//
 // In jwx/v3.1.1:
 //   - Token accessor methods (Subject, Issuer, Audience, JwtID) return (value, bool).
 //   - tok.Get(key, &dst) uses a destination pointer and returns error.
-//   - Use jwt.WithKeySet for key-set-based verification; do NOT combine with jwt.WithKey(alg, keySet).
 func (v *JWTValidator) parseAndValidate(ctx context.Context, tokenStr string, keySet jwk.Set) (*SessionClaims, error) {
+	kp := &algEnforcingKeyProvider{set: keySet, algSet: v.algSet}
 	opts := []jwt.ParseOption{
-		jwt.WithKeySet(keySet),
+		jwt.WithKeyProvider(kp),
 		jwt.WithValidate(true),
 		jwt.WithAcceptableSkew(v.cfg.ClockSkew),
 		jwt.WithIssuer(v.cfg.Issuer),
@@ -271,14 +366,4 @@ func toStringSlice(v interface{}) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unexpected type %T, want []string or []interface{}", v)
 	}
-}
-
-// newHTTPRequestWithContext is a thin wrapper around http.NewRequestWithContext.
-func newHTTPRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-	return http.NewRequestWithContext(ctx, method, url, body)
-}
-
-// defaultHTTPClient returns a standard HTTP client with a reasonable timeout.
-func defaultHTTPClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
 }

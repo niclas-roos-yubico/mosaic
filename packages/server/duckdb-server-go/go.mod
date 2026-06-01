@@ -1,4 +1,4 @@
-module github.com/uwdata/mosaic/packages/server/duckdb-server-go
+module github.com/Yubico/mosaic/packages/server/duckdb-server-go
 
 go 1.25.0
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Yubico/mosaic/packages/server/duckdb-server-go/internal/server"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/internal/server"
 )
 
 // buildTestServer constructs a Server with a real JWTValidator backed by an

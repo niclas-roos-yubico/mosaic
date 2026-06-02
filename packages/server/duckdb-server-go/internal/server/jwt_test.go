@@ -13,7 +13,7 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jwt"
-	"github.com/Yubico/mosaic/packages/server/duckdb-server-go/internal/server"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/internal/server"
 )
 
 // genTestKey generates a fresh RSA key pair and returns the private key and

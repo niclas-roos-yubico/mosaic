@@ -12,7 +12,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"github.com/Yubico/mosaic/packages/server/duckdb-server-go/internal/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/internal/query"
 )
 
 type Command string

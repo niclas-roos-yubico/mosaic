@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time" // FORK: WebSocket expiry enforcement.
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -52,10 +53,12 @@ type commandExecutor interface {
 type handler struct {
 	db                 commandExecutor
 	schemaMatchHeaders []string
-	logger             *slog.Logger
-	authorizer         Authorizer
-	httpHandler        http.Handler
-	websocketOptions   WebSocketOptions
+	// FORK: JWT-derived schema/expiry resolution, see schema_resolver.go.
+	schemaResolver   SchemaResolver
+	logger           *slog.Logger
+	authorizer       Authorizer
+	httpHandler      http.Handler
+	websocketOptions WebSocketOptions
 }
 
 // New constructs a Mosaic HTTP and WebSocket handler backed by db. Omitting
@@ -77,6 +80,7 @@ func newHandler(db commandExecutor, cfg config) *handler {
 	s := &handler{
 		db:                 db,
 		schemaMatchHeaders: cfg.schemaMatchHeaders,
+		schemaResolver:     cfg.schemaResolver, // FORK: JWT-derived schema/expiry resolution.
 		logger:             cfg.logger,
 		authorizer:         cfg.authorizer,
 		websocketOptions:   cfg.websocket,
@@ -118,13 +122,34 @@ func (s *handler) writeHTTPError(w http.ResponseWriter, err error) {
 	http.Error(w, response.message, response.status)
 }
 
+// FORK: resolve JWT-derived schemas and expiry without coupling server to platformauth.
+func (s *handler) requestSchemas(r *http.Request) (SchemaResolution, error) {
+	if s.schemaResolver != nil {
+		resolution, err := s.schemaResolver.ResolveSchemas(r)
+		if err != nil {
+			return SchemaResolution{}, &authorizationError{err: err}
+		}
+		if len(resolution.AllowedSchemas) == 0 {
+			return SchemaResolution{}, &authorizationError{err: ErrUnauthenticated}
+		}
+		return resolution, nil
+	}
+	return SchemaResolution{AllowedSchemas: getAllowedSchemas(r, s.schemaMatchHeaders)}, nil
+}
+
 func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !webSocketOriginAllowed(r, s.websocketOptions) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
-	allowedSchemas := getAllowedSchemas(r, s.schemaMatchHeaders)
+	// FORK: resolve schemas/expiry via requestSchemas instead of reading headers directly.
+	resolution, err := s.requestSchemas(r)
+	if err != nil {
+		s.writeHTTPError(w, err)
+		return
+	}
+	allowedSchemas := resolution.AllowedSchemas
 	if len(s.schemaMatchHeaders) > 0 && len(allowedSchemas) == 0 {
 		s.logger.Error("server: no allowed schemas found in request headers", "headers", s.schemaMatchHeaders)
 		http.Error(w, "no allowed schemas found in request headers", http.StatusUnauthorized)
@@ -147,13 +172,30 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FORK: bound the session to the resolved expiry (validated JWT exp), closing with 1008.
+	//
+	// This proactively closes at expiry rather than deriving a deadline context
+	// for wsjson.Read: github.com/coder/websocket's read-timeout handling
+	// force-closes the raw connection the instant a deadline context passed to
+	// Read is done (see (*Conn).setupReadTimeout), before a subsequent graceful
+	// Close(status, reason) call can write a close frame. Closing directly at
+	// expiry avoids that race and deterministically delivers the
+	// StatusPolicyViolation/"session expired" close frame to the peer.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	if !resolution.ExpiresAt.IsZero() {
+		expiryTimer := time.AfterFunc(time.Until(resolution.ExpiresAt), func() {
+			if closeErr := conn.Close(websocket.StatusPolicyViolation, "session expired"); closeErr != nil {
+				s.logger.Error("server: error closing websocket", "error", closeErr)
+			}
+		})
+		defer expiryTimer.Stop()
+	}
+
 	defer func() {
-		err = conn.Close(websocket.StatusInternalError, "connection closed")
-		if err != nil {
-			s.logger.Error("server: error closing websocket", "error", err)
+		if closeErr := conn.Close(websocket.StatusInternalError, "connection closed"); closeErr != nil {
+			s.logger.Error("server: error closing websocket", "error", closeErr)
 		}
 	}()
 
@@ -201,7 +243,13 @@ func (s *handler) handleWebSocketMessage(ctx context.Context, conn *websocket.Co
 }
 
 func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	allowedSchemas := getAllowedSchemas(r, s.schemaMatchHeaders)
+	// FORK: resolve schemas/expiry via requestSchemas instead of reading headers directly.
+	resolution, err := s.requestSchemas(r)
+	if err != nil {
+		s.writeHTTPError(w, err)
+		return
+	}
+	allowedSchemas := resolution.AllowedSchemas
 	if len(s.schemaMatchHeaders) > 0 && len(allowedSchemas) == 0 {
 		s.logger.Error("server: no allowed schemas found in request headers", "headers", s.schemaMatchHeaders)
 		http.Error(w, "no allowed schemas found in request headers", http.StatusUnauthorized)
@@ -286,7 +334,8 @@ func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSc
 
 	switch command.Type() {
 	case CommandExec:
-		if len(s.schemaMatchHeaders) > 0 {
+		// FORK: either schema policy makes unrestricted exec unsafe.
+		if len(s.schemaMatchHeaders) > 0 || s.schemaResolver != nil {
 			return commandResponse{}, query.ErrExecWithValidation
 		}
 		err = s.db.Exec(ctx, command.SQL())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,17 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/lestrrat-go/jwx/v3/jwt"
+)
+
+// errJWKSUnavailable and errKeyOrSignature are internal sentinels that let
+// Middleware classify a Validate failure into a sanitized reason code
+// (classifyValidationError in platformauth.go) via errors.Is, without ever
+// formatting the underlying error — which, for errKeyOrSignature, can carry
+// the token's attacker-controlled "kid" header verbatim (see
+// algEnforcingKeyProvider.FetchKeys) — into a log line or response.
+var (
+	errJWKSUnavailable = errors.New("jwt: jwks unavailable")
+	errKeyOrSignature  = errors.New("jwt: key resolution or signature verification failed")
 )
 
 // SessionClaims are the validated claims extracted from a Platform session JWT.
@@ -99,7 +111,7 @@ func (v *JWTValidator) Validate(ctx context.Context, tokenStr string) (*SessionC
 	// Initial fetch (or serve from cache if fresh).
 	keySet, err := v.getKeySet(ctx, false)
 	if err != nil {
-		return nil, fmt.Errorf("jwt: could not fetch JWKS (fail-closed): %w", err)
+		return nil, fmt.Errorf("%w: jwt: could not fetch JWKS (fail-closed): %w", errJWKSUnavailable, err)
 	}
 
 	// Only force a JWKS refresh when the token's kid is absent from the
@@ -111,7 +123,7 @@ func (v *JWTValidator) Validate(ctx context.Context, tokenStr string) (*SessionC
 			// kid not in cache — re-fetch and retry once.
 			keySet, err = v.getKeySet(ctx, true) // force=true bypasses cache TTL
 			if err != nil {
-				return nil, fmt.Errorf("jwt: JWKS refresh failed (fail-closed): %w", err)
+				return nil, fmt.Errorf("%w: jwt: JWKS refresh failed (fail-closed): %w", errJWKSUnavailable, err)
 			}
 		}
 	}
@@ -235,26 +247,29 @@ func (p *algEnforcingKeyProvider) FetchKeys(_ context.Context, sink jws.KeySink,
 	if hasKid {
 		key, found = p.set.LookupKeyID(wantedKid)
 		if !found {
-			return fmt.Errorf("failed to find key with key ID %q in key set", wantedKid)
+			// wantedKid is the token header's "kid" and is attacker-controlled;
+			// it is wrapped in errKeyOrSignature (not logged raw) precisely so
+			// callers classify this failure without ever formatting it.
+			return fmt.Errorf("%w: failed to find key with key ID %q in key set", errKeyOrSignature, wantedKid)
 		}
 	} else {
 		if p.set.Len() != 1 {
-			return fmt.Errorf("no kid in token and key set has %d keys (expected exactly 1)", p.set.Len())
+			return fmt.Errorf("%w: no kid in token and key set has %d keys (expected exactly 1)", errKeyOrSignature, p.set.Len())
 		}
 		key, found = p.set.Key(0)
 		if !found {
-			return fmt.Errorf("failed to get key at index 0 (empty JWKS?)")
+			return fmt.Errorf("%w: failed to get key at index 0 (empty JWKS?)", errKeyOrSignature)
 		}
 	}
 
 	// Determine the algorithm from the JWK.
 	algVal, hasAlg := key.Algorithm()
 	if !hasAlg {
-		return fmt.Errorf("jwt: JWK has no algorithm set")
+		return fmt.Errorf("%w: jwt: JWK has no algorithm set", errKeyOrSignature)
 	}
 	salg, ok := jwa.LookupSignatureAlgorithm(algVal.String())
 	if !ok {
-		return fmt.Errorf("jwt: JWK has unrecognised algorithm %q", algVal)
+		return fmt.Errorf("%w: jwt: JWK has unrecognised algorithm %q", errKeyOrSignature, algVal)
 	}
 
 	// Enforce the configured allowlist.
@@ -266,7 +281,7 @@ func (p *algEnforcingKeyProvider) FetchKeys(_ context.Context, sink jws.KeySink,
 		}
 	}
 	if !allowed {
-		return fmt.Errorf("jwt: algorithm %q is not in the configured allowlist", salg)
+		return fmt.Errorf("%w: jwt: algorithm %q is not in the configured allowlist", errKeyOrSignature, salg)
 	}
 
 	sink.Key(salg, key)

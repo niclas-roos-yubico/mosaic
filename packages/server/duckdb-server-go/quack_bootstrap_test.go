@@ -89,13 +89,25 @@ func TestStartQuackErrorRedactsBootstrapSecrets(t *testing.T) {
 }
 
 func TestQuackBootstrapFDDeadline(t *testing.T) {
+	// Shorten the production deadline for this test only, via the package-level var (not a
+	// parameter of readQuackBootstrapFD), and restore it unconditionally afterward.
+	const testDeadline = 200 * time.Millisecond
+	original := quackBootstrapReadDeadline
+	quackBootstrapReadDeadline = testDeadline
+	t.Cleanup(func() { quackBootstrapReadDeadline = original })
+
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	defer func() { _ = w.Close() }()
 	started := time.Now()
 	_, err = readQuackBootstrapFD(int(r.Fd()))
+	elapsed := time.Since(started)
+
 	require.Error(t, err)
-	require.Less(t, time.Since(started), 6*time.Second)
+	require.Truef(t, errors.Is(err, os.ErrDeadlineExceeded), "expected a genuine read-deadline timeout (os.ErrDeadlineExceeded), got: %v", err)
+	require.Falsef(t, errors.Is(err, os.ErrNoDeadline), "SetReadDeadline must not fail eagerly with ErrNoDeadline, got: %v", err)
+	require.GreaterOrEqual(t, elapsed, testDeadline, "deadline must actually fire, not return instantly")
+	require.Less(t, elapsed, 6*time.Second)
 }
 
 func TestQuackBootstrapFDReadsClosedPipe(t *testing.T) {

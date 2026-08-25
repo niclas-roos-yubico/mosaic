@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -89,16 +90,31 @@ func startQuack(ctx context.Context, connector *duckdb.Connector, cfg quackBoots
 	return conn, nil
 }
 
+// quackBootstrapReadDeadline bounds how long readQuackBootstrapFD waits for the parent to write
+// the bootstrap payload before giving up. It is a package-level var rather than a parameter of
+// readQuackBootstrapFD so a test can shorten it without adding a test-only knob to the production
+// function signature; production code never assigns to it.
+var quackBootstrapReadDeadline = 5 * time.Second
+
 func readQuackBootstrapFD(fd int) (quackBootstrapConfig, error) {
 	if fd < 3 {
 		return quackBootstrapConfig{}, errors.New("quack bootstrap: descriptor must be at least 3")
+	}
+	// Inherited descriptors arrive in blocking mode. os.NewFile only registers a file with the
+	// runtime poller -- which is what makes SetReadDeadline below actually work -- when the fd is
+	// already non-blocking at wrap time; otherwise SetReadDeadline fails immediately with
+	// ErrNoDeadline and no read is ever attempted, so even a well-behaved parent's payload could
+	// never be read. Do not remove this call: it looks redundant with SetReadDeadline, but the
+	// deadline cannot arm without it.
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return quackBootstrapConfig{}, fmt.Errorf("quack bootstrap: set nonblocking: %w", err)
 	}
 	file := os.NewFile(uintptr(fd), "quack-bootstrap")
 	if file == nil {
 		return quackBootstrapConfig{}, errors.New("quack bootstrap: invalid descriptor")
 	}
 	defer func() { _ = file.Close() }()
-	if err := file.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := file.SetReadDeadline(time.Now().Add(quackBootstrapReadDeadline)); err != nil {
 		return quackBootstrapConfig{}, fmt.Errorf("quack bootstrap: set read deadline: %w", err)
 	}
 	return readQuackBootstrap(file)

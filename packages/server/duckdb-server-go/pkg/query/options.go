@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/functionset"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/functionset"
 )
 
 type Options struct {

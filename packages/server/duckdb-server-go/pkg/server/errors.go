@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 var errNoCommandAuthorizer = errors.New("server: authorizer returned no command authorizer")

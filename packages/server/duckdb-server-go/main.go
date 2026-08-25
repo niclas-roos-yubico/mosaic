@@ -13,9 +13,9 @@ import (
 
 	"github.com/duckdb/duckdb-go/v2"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/extensions"
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/server"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/extensions"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/server"
 )
 
 func main() {

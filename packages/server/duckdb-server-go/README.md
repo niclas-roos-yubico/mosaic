@@ -9,7 +9,7 @@ _Note:_ This package provides a local DuckDB server. To instead use DuckDB-WASM 
 Install the server with `go install`.
 
 ```sh
-go install -tags=duckdb_arrow github.com/uwdata/mosaic/packages/server/duckdb-server-go@latest
+go install -tags=duckdb_arrow github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go@latest
 ```
 
 Then run the server with

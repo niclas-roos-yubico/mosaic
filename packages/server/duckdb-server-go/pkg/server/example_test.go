@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/server"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/server"
 )
 
 type identityKey struct{}

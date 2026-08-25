@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync" // FORK: single-source WebSocket close via sync.Once.
 	"time" // FORK: WebSocket expiry enforcement.
 
 	"github.com/coder/websocket"
@@ -184,23 +185,43 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// FORK: unlike the network ctx above, the query path is not subject to the
+	// websocket read/write race, so it keeps a deadline bound to the resolved
+	// expiry: an in-flight query must not keep running under pre-expiry
+	// authorization past the session's validated exp.
+	queryCtx := ctx
 	if !resolution.ExpiresAt.IsZero() {
-		expiryTimer := time.AfterFunc(time.Until(resolution.ExpiresAt), func() {
-			if closeErr := conn.Close(websocket.StatusPolicyViolation, "session expired"); closeErr != nil {
+		var queryCancel context.CancelFunc
+		queryCtx, queryCancel = context.WithDeadline(ctx, resolution.ExpiresAt)
+		defer queryCancel()
+	}
+
+	// FORK: single-source the close through sync.Once so an expiry and an
+	// ordinary teardown can never race on which status/reason the peer sees,
+	// and so the losing side never performs (or logs) a redundant second
+	// Close call. See close.go: a second Close is a no-op that returns a
+	// wrapped net.ErrClosed, which would otherwise log an ERROR on every
+	// single legitimate expiry.
+	var closeOnce sync.Once
+	closeConn := func(status websocket.StatusCode, reason string) {
+		closeOnce.Do(func() {
+			if closeErr := conn.Close(status, reason); closeErr != nil {
 				s.logger.Error("server: error closing websocket", "error", closeErr)
 			}
+		})
+	}
+
+	if !resolution.ExpiresAt.IsZero() {
+		expiryTimer := time.AfterFunc(time.Until(resolution.ExpiresAt), func() {
+			closeConn(websocket.StatusPolicyViolation, "session expired")
 		})
 		defer expiryTimer.Stop()
 	}
 
-	defer func() {
-		if closeErr := conn.Close(websocket.StatusInternalError, "connection closed"); closeErr != nil {
-			s.logger.Error("server: error closing websocket", "error", closeErr)
-		}
-	}()
+	defer closeConn(websocket.StatusInternalError, "connection closed")
 
 	for {
-		err = s.handleWebSocketMessage(ctx, conn, allowedSchemas, authorize)
+		err = s.handleWebSocketMessage(ctx, queryCtx, conn, allowedSchemas, authorize)
 		if err != nil {
 			s.logger.Error("server: websocket error, breaking connection", "error", err)
 			break
@@ -209,15 +230,19 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // A returned error closes the connection. Command errors are written to the
-// client and return nil so the session survives them.
-func (s *handler) handleWebSocketMessage(ctx context.Context, conn *websocket.Conn, allowedSchemas []string, authorize CommandAuthorizer) error {
+// client and return nil so the session survives them. ctx bounds the
+// websocket read/write; queryCtx additionally carries the resolved session
+// expiry as a deadline and bounds command execution.
+func (s *handler) handleWebSocketMessage(ctx, queryCtx context.Context, conn *websocket.Conn, allowedSchemas []string, authorize CommandAuthorizer) error {
 	var params queryParams
 	err := wsjson.Read(ctx, conn, &params)
 	if err != nil {
 		return fmt.Errorf("failed to read websocket message: %w", err)
 	}
 
-	response, err := s.execCommand(ctx, params, allowedSchemas, authorize)
+	// FORK: bound query execution (and its authorization) by the resolved
+	// session expiry via queryCtx, not the plain network ctx.
+	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize)
 	if err != nil {
 		errResponse := s.classifyAndLogError(err)
 		writeErr := wsjson.Write(ctx, conn, map[string]string{

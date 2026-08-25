@@ -107,6 +107,15 @@ func TestRegressionPublicPolicyStack(t *testing.T) {
 	require.Equal(t, http.StatusOK, allowed.Code, allowed.Body.String())
 	require.Contains(t, allowed.Body.String(), "tenant-a-only")
 	require.Empty(t, allowed.Header().Get("Cache-Status"))
+	// A second identical request is exactly what would produce a cache hit
+	// (see pkg/server/server_test.go's "mosaic-duckdb-go; hit" assertion) if
+	// result caching were live. Asserting emptiness only after the first-ever
+	// touch would be vacuous: a first touch is a structural miss whether
+	// caching is enabled or not.
+	allowedAgain := postCommand(t, s.handler, tokenA, selectBody)
+	require.Equal(t, http.StatusOK, allowedAgain.Code, allowedAgain.Body.String())
+	require.Contains(t, allowedAgain.Body.String(), "tenant-a-only")
+	require.Empty(t, allowedAgain.Header().Get("Cache-Status"))
 	denied := postCommand(t, s.handler, tokenB, selectBody)
 	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
 	require.NotContains(t, denied.Body.String(), "tenant-a-only")
@@ -148,8 +157,13 @@ func TestRegressionGuardedHTTPErrorMapping(t *testing.T) {
 		require.Equal(t, http.StatusRequestEntityTooLarge, res.Code, res.Body.String())
 	})
 	t.Run("query timeout", func(t *testing.T) {
+		// 100ms clears the ~10-19ms checkCatalogOn scan cost measured in
+		// transaction_test.go's TestGuardedQueryTimeoutDiscardsConnection, so
+		// the billion-row cross join actually reaches execution and is
+		// interrupted there, instead of the guard budget being exhausted
+		// before the query ever runs.
 		s := newEnforcedServer(t, `CREATE SCHEMA tenant_a; CREATE TABLE tenant_a.safe(value INTEGER); INSERT INTO tenant_a.safe VALUES (1)`,
-			query.TransactionOptions{Timeout: time.Millisecond, MaxResultBytes: 1 << 20})
+			query.TransactionOptions{Timeout: 100 * time.Millisecond, MaxResultBytes: 1 << 20})
 		res := postCommand(t, s.handler, s.token(t, []string{"tenant_a"}, time.Hour),
 			`{"type":"json","sql":"SELECT sum(i) FROM range(1000000000) t(i) CROSS JOIN tenant_a.safe"}`)
 		require.Equal(t, http.StatusGatewayTimeout, res.Code, res.Body.String())

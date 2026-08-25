@@ -34,6 +34,12 @@ type DB struct {
 	functionAllowlistConfigured bool
 	rejectRemoteURILiterals     bool
 	logger                      *slog.Logger
+
+	// FORK: Task 7 guarded-execution coordinator state. When transaction is non-nil, all four query APIs route
+	// through executeGuarded instead of the unguarded db.db/arrowPool paths. resultCacheDisabled is mandatory
+	// whenever transaction is non-nil (enforced in New) and, when true, means db.cache is nil.
+	transaction         *TransactionOptions
+	resultCacheDisabled bool
 }
 
 // New creates a new DB instance using the provided DuckDB connector, opening a sql.DB and arrow connection.
@@ -60,31 +66,52 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 		return nil, errors.New("query: function allowlist and blocklist cannot both be configured")
 	}
 
+	// FORK: Task 7 guarded-execution coordinator option validation. This runs before sql.OpenDB/newArrowPool
+	// below, so a rejection here never leaves behind a partially constructed DB or an open connection.
+	if o.Transaction != nil {
+		if o.Transaction.Timeout <= 0 {
+			return nil, errors.New("query: transactional catalog guard requires a positive timeout")
+		}
+		if o.Transaction.MaxResultBytes <= 0 {
+			return nil, errors.New("query: transactional catalog guard requires a positive max result bytes")
+		}
+		if !o.DisableResultCache {
+			return nil, errors.New("query: transactional catalog guard requires the result cache to be disabled")
+		}
+	}
+
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(o.MaxConnections)
 
-	// the cache can be limited either by number of entries or total size in bytes
-	// if both are set, MaxCacheBytes takes precedence
-	cacheOpts := &otter.Options[uint64, []byte]{}
+	// FORK: when the result cache is disabled, no otter cache is constructed at all: db.cache stays nil and
+	// every cache read/write path below already treats a nil db.cache as "no cache" (see the `db.cache != nil`
+	// guards in QueryJSON/QueryArrow/executeGuarded).
+	var cache *otter.Cache[uint64, []byte]
+	if !o.DisableResultCache {
+		// the cache can be limited either by number of entries or total size in bytes
+		// if both are set, MaxCacheBytes takes precedence
+		cacheOpts := &otter.Options[uint64, []byte]{}
 
-	switch {
-	case o.MaxCacheBytes > 0:
-		cacheOpts.MaximumWeight = uint64(o.MaxCacheBytes)
-		cacheOpts.Weigher = func(key uint64, value []byte) uint32 {
-			return uint32(len(value))
+		switch {
+		case o.MaxCacheBytes > 0:
+			cacheOpts.MaximumWeight = uint64(o.MaxCacheBytes)
+			cacheOpts.Weigher = func(key uint64, value []byte) uint32 {
+				return uint32(len(value))
+			}
+
+		case o.MaxCacheEntries > 0:
+			cacheOpts.MaximumSize = o.MaxCacheEntries
 		}
 
-	case o.MaxCacheEntries > 0:
-		cacheOpts.MaximumSize = o.MaxCacheEntries
-	}
+		if o.TTL > 0 {
+			cacheOpts.ExpiryCalculator = otter.ExpiryCreating[uint64, []byte](o.TTL)
+		}
 
-	if o.TTL > 0 {
-		cacheOpts.ExpiryCalculator = otter.ExpiryCreating[uint64, []byte](o.TTL)
-	}
-
-	cache, err := otter.New[uint64, []byte](cacheOpts)
-	if err != nil {
-		return nil, fmt.Errorf("query: failed to create cache: %w", err)
+		var err error
+		cache, err = otter.New[uint64, []byte](cacheOpts)
+		if err != nil {
+			return nil, fmt.Errorf("query: failed to create cache: %w", err)
+		}
 	}
 
 	return &DB{
@@ -101,6 +128,10 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 		functionAllowlistConfigured: functionAllowlistConfigured,
 		rejectRemoteURILiterals:     o.RejectRemoteURILiterals,
 		logger:                      o.Logger,
+
+		// FORK: Task 7 guarded-execution coordinator state.
+		transaction:         o.Transaction,
+		resultCacheDisabled: o.DisableResultCache,
 	}, nil
 }
 
@@ -149,7 +180,9 @@ func (db *DB) Close() {
 }
 
 func (db *DB) Exec(ctx context.Context, query string) error {
-	if len(db.functionBlocklist) > 0 || db.functionAllowlistConfigured || db.rejectRemoteURILiterals {
+	// FORK: db.transaction != nil added as a third, independent exec gate (Task 7): guarded mode must never allow
+	// raw exec to bypass the transactional catalog guard, even if a future binary omits the function options.
+	if db.transaction != nil || len(db.functionBlocklist) > 0 || db.functionAllowlistConfigured || db.rejectRemoteURILiterals {
 		return ErrExecWithValidation
 	}
 
@@ -209,6 +242,14 @@ func (db *DB) validateQueryOn(ctx context.Context, conn driver.Conn, statement s
 }
 
 func (db *DB) QueryJSON(ctx context.Context, query string, allowedSchemas []string, useCache bool) (json.RawMessage, bool, error) {
+	// FORK: Task 7 guarded-execution coordinator. When enabled, this bypasses db.validateQuery/db.cache/db.writeJSON
+	// entirely: executeGuarded performs its own validation, catalog check, execution, and (structurally disabled)
+	// cache lookup inside one pinned transaction. Upstream behavior below is unchanged when db.transaction is nil.
+	if db.transaction != nil {
+		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseJSON)
+		return json.RawMessage(data), false, err
+	}
+
 	err := db.validateQuery(ctx, query, allowedSchemas)
 	if err != nil {
 		return nil, false, err
@@ -239,6 +280,20 @@ func (db *DB) QueryJSON(ctx context.Context, query string, allowedSchemas []stri
 }
 
 func (db *DB) WriteJSON(ctx context.Context, query string, allowedSchemas []string, w io.Writer) error {
+	// FORK: Task 7 guarded-execution coordinator. executeGuarded fully materializes and commits before this
+	// performs its single w.Write(data): the client must never observe bytes from a transaction that later rolled
+	// back. Upstream behavior below is unchanged when db.transaction is nil.
+	if db.transaction != nil {
+		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseJSON)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(data); err != nil {
+			return fmt.Errorf("query: failed to write response: %w", err)
+		}
+		return nil
+	}
+
 	err := db.validateQuery(ctx, query, allowedSchemas)
 	if err != nil {
 		return err
@@ -249,7 +304,9 @@ func (db *DB) WriteJSON(ctx context.Context, query string, allowedSchemas []stri
 
 // SECURITY: writeJSON executes without policy validation. Call it only after validateQuery succeeds for the same query
 // and request-scoped allowed schemas.
-// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing.
+// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing, and
+// delegates encoding to writeJSONOn (extracted in Task 7 so the guarded coordinator can reuse the same encoder on
+// a connection it already holds inside a transaction).
 func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
 	pc, err := db.arrowPool.acquire(ctx)
 	if err != nil {
@@ -257,7 +314,13 @@ func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
 	}
 	defer db.arrowPool.release(pc)
 
-	rdr, err := pc.arrow.QueryContext(ctx, query)
+	return db.writeJSONOn(ctx, pc.arrow, query, w)
+}
+
+// FORK: new function, extracted from writeJSON's body (Task 7) so the guarded coordinator in transaction.go can
+// invoke it directly on the pooledArrowConn.arrow it already holds, without a second pool acquisition.
+func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) error {
+	rdr, err := arrowConn.QueryContext(ctx, statement)
 	if err != nil {
 		return fmt.Errorf("query: failed to execute query: %w", err)
 	}
@@ -299,6 +362,13 @@ func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
 }
 
 func (db *DB) QueryArrow(ctx context.Context, query string, allowedSchemas []string, useCache bool) ([]byte, bool, error) {
+	// FORK: Task 7 guarded-execution coordinator, mirroring QueryJSON above. Upstream behavior below is unchanged
+	// when db.transaction is nil.
+	if db.transaction != nil {
+		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseArrow)
+		return data, false, err
+	}
+
 	err := db.validateQuery(ctx, query, allowedSchemas)
 	if err != nil {
 		return nil, false, err
@@ -329,6 +399,19 @@ func (db *DB) QueryArrow(ctx context.Context, query string, allowedSchemas []str
 }
 
 func (db *DB) WriteArrow(ctx context.Context, query string, allowedSchemas []string, w io.Writer) error {
+	// FORK: Task 7 guarded-execution coordinator, mirroring WriteJSON above: executeGuarded commits before this
+	// performs its single w.Write(data). Upstream behavior below is unchanged when db.transaction is nil.
+	if db.transaction != nil {
+		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseArrow)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(data); err != nil {
+			return fmt.Errorf("query: failed to write response: %w", err)
+		}
+		return nil
+	}
+
 	err := db.validateQuery(ctx, query, allowedSchemas)
 	if err != nil {
 		return err
@@ -339,7 +422,9 @@ func (db *DB) WriteArrow(ctx context.Context, query string, allowedSchemas []str
 
 // SECURITY: writeArrow executes without policy validation. Call it only after validateQuery succeeds for the same query
 // and request-scoped allowed schemas.
-// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing.
+// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing, and
+// delegates encoding to writeArrowOn (extracted in Task 7 so the guarded coordinator can reuse the same encoder on
+// a connection it already holds inside a transaction).
 func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
 	pc, err := db.arrowPool.acquire(ctx)
 	if err != nil {
@@ -347,7 +432,13 @@ func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
 	}
 	defer db.arrowPool.release(pc)
 
-	rdr, err := pc.arrow.QueryContext(ctx, query)
+	return db.writeArrowOn(ctx, pc.arrow, query, w)
+}
+
+// FORK: new function, extracted from writeArrow's body (Task 7) so the guarded coordinator in transaction.go can
+// invoke it directly on the pooledArrowConn.arrow it already holds, without a second pool acquisition.
+func (db *DB) writeArrowOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) error {
+	rdr, err := arrowConn.QueryContext(ctx, statement)
 	if err != nil {
 		return fmt.Errorf("query: failed to execute query: %w", err)
 	}

@@ -2,6 +2,7 @@ package query
 
 import (
 	"testing"
+	"time" // FORK: TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache exercises TransactionOptions timeouts.
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/assert"
@@ -95,6 +96,27 @@ func TestNewNormalizesCustomFunctionOptions(t *testing.T) {
 
 	_, _, err = db.QueryJSON(t.Context(), "SELECT md5('mosaic')", nil, false)
 	require.NoError(t, err)
+}
+
+// FORK: guards the Task 7 transactional catalog guard's option validation: non-positive limits and
+// enabling the guard without disabling the result cache must all be rejected by New.
+func TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache(t *testing.T) {
+	connector, err := duckdb.NewConnector(":memory:", nil)
+	require.NoError(t, err)
+	defer connector.Close()
+	for name, options := range map[string][]OptionFunc{
+		"zero timeout":  {WithResultCacheDisabled(), WithTransactionalCatalogGuard(TransactionOptions{MaxResultBytes: 1})},
+		"zero bytes":    {WithResultCacheDisabled(), WithTransactionalCatalogGuard(TransactionOptions{Timeout: time.Second})},
+		"cache enabled": {WithTransactionalCatalogGuard(TransactionOptions{Timeout: time.Second, MaxResultBytes: 1})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, err := New(t.Context(), connector, options...)
+			require.Error(t, err)
+			if db != nil {
+				db.Close()
+			}
+		})
+	}
 }
 
 func TestFunctionAllowlistAndBlocklistAreMutuallyExclusive(t *testing.T) {

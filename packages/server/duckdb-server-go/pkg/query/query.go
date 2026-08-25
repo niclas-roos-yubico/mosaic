@@ -11,13 +11,10 @@ import (
 	"hash/maphash"
 	"io"
 	"log/slog"
-	"runtime"
-	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/maypok86/otter/v2"
-	"golang.org/x/sync/semaphore"
 )
 
 var ErrExecWithValidation = errors.New("query: exec command is disabled when query validation is active")
@@ -25,10 +22,9 @@ var ErrExecWithValidation = errors.New("query: exec command is disabled when que
 type DB struct {
 	db *sql.DB
 
-	// since db.SetMaxOpenConns doesn't apply to Arrow connections, we're using a sync.Pool to reuse connections,
-	// and a semaphore to limit connections to the same as the sql.DB max connections
-	connPool       *sync.Pool
-	arrowSemaphore *semaphore.Weighted
+	// FORK: connPool+arrowSemaphore replaced by arrowPool, which pairs each Arrow object with the driver.Conn it
+	// was built from so callers can begin a transaction on the connection and execute in that same transaction.
+	arrowPool *arrowPool
 
 	cache     *otter.Cache[uint64, []byte]
 	cacheSeed maphash.Seed
@@ -67,8 +63,6 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(o.MaxConnections)
 
-	arrowSemaphore := semaphore.NewWeighted(int64(o.MaxConnections))
-
 	// the cache can be limited either by number of entries or total size in bytes
 	// if both are set, MaxCacheBytes takes precedence
 	cacheOpts := &otter.Options[uint64, []byte]{}
@@ -96,8 +90,8 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 	return &DB{
 		db: db,
 
-		connPool:       newArrowSyncPool(ctx, connector, o.Logger),
-		arrowSemaphore: arrowSemaphore,
+		// FORK: arrowPool replaces the old connPool+arrowSemaphore pairing (see arrow_pool.go).
+		arrowPool: newArrowPool(connector, o.MaxConnections, o.Logger),
 
 		cache:     cache,
 		cacheSeed: maphash.MakeSeed(), // Initialize the cache seed for consistent hashing
@@ -108,55 +102,6 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 		rejectRemoteURILiterals:     o.RejectRemoteURILiterals,
 		logger:                      o.Logger,
 	}, nil
-}
-
-func newArrowSyncPool(ctx context.Context, connector *duckdb.Connector, logger *slog.Logger) *sync.Pool {
-	return &sync.Pool{
-		New: func() any {
-			conn, err := connector.Connect(ctx)
-			if err != nil {
-				return nil
-			}
-
-			arrow, err := duckdb.NewArrowFromConn(conn)
-			if err != nil {
-				return nil
-			}
-
-			runtime.AddCleanup(arrow, func(driverConn driver.Conn) {
-				closeErr := driverConn.Close()
-				if closeErr != nil {
-					logger.Error("query: failed to close Arrow connection", "error", closeErr)
-				}
-			}, conn)
-
-			return arrow
-		},
-	}
-}
-
-func (db *DB) getArrowConn(ctx context.Context) (*duckdb.Arrow, error) {
-	err := db.arrowSemaphore.Acquire(ctx, 1)
-	if err != nil {
-		return nil, fmt.Errorf("query: failed to acquire connection: %w", err)
-	}
-
-	untypedArrow := db.connPool.Get()
-	if untypedArrow == nil {
-		return nil, fmt.Errorf("query: failed to get Arrow connection from pool")
-	}
-
-	arrow, ok := untypedArrow.(*duckdb.Arrow)
-	if !ok {
-		return nil, fmt.Errorf("query: invalid type in Arrow connection pool")
-	}
-
-	return arrow, nil
-}
-
-func (db *DB) putArrowConn(arrow *duckdb.Arrow) {
-	db.connPool.Put(arrow)
-	db.arrowSemaphore.Release(1)
 }
 
 type Extension struct {
@@ -216,7 +161,10 @@ func (db *DB) Exec(ctx context.Context, query string) error {
 	return nil
 }
 
-func (db *DB) validateQuery(ctx context.Context, query string, allowedSchemas []string) error {
+// FORK: validator construction extracted out of validateQuery into newValidators, so validateQueryOn can build the
+// same validator set. validateQuery itself is unchanged in behavior and must keep working exactly as before: Task 7
+// calls it, unmodified, through the *sql.DB path for cheap pre-Arrow load-shedding.
+func (db *DB) newValidators(allowedSchemas []string) []Validator {
 	validators := make([]Validator, 0, 4)
 	if len(allowedSchemas) > 0 {
 		validators = append(validators, newBaseTableValidator(allowedSchemas))
@@ -230,6 +178,11 @@ func (db *DB) validateQuery(ctx context.Context, query string, allowedSchemas []
 	if db.rejectRemoteURILiterals {
 		validators = append(validators, newRemoteURILiteralValidator())
 	}
+	return validators
+}
+
+func (db *DB) validateQuery(ctx context.Context, query string, allowedSchemas []string) error {
+	validators := db.newValidators(allowedSchemas)
 	if len(validators) == 0 {
 		return nil
 	}
@@ -240,6 +193,19 @@ func (db *DB) validateQuery(ctx context.Context, query string, allowedSchemas []
 	}
 
 	return nil
+}
+
+// FORK: new function. validateQueryOn runs the same validator set as validateQuery, but on a specific driver.Conn
+// (via validateSQLOn) so validation participates in a transaction already open on conn, and additionally collects
+// the base-table references the query touched, for the live catalog check Task 6 adds on top of this.
+func (db *DB) validateQueryOn(ctx context.Context, conn driver.Conn, statement string, allowedSchemas []string) ([]tableRef, error) {
+	validators := db.newValidators(allowedSchemas)
+	collector := newRelationCollector()
+	validators = append(validators, collector)
+	if err := validateSQLOn(ctx, conn, statement, validators...); err != nil {
+		return nil, fmt.Errorf("query: validation failed: %w", err)
+	}
+	return collector.list(), nil
 }
 
 func (db *DB) QueryJSON(ctx context.Context, query string, allowedSchemas []string, useCache bool) (json.RawMessage, bool, error) {
@@ -283,14 +249,15 @@ func (db *DB) WriteJSON(ctx context.Context, query string, allowedSchemas []stri
 
 // SECURITY: writeJSON executes without policy validation. Call it only after validateQuery succeeds for the same query
 // and request-scoped allowed schemas.
+// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing.
 func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
-	arrow, err := db.getArrowConn(ctx)
+	pc, err := db.arrowPool.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer db.putArrowConn(arrow)
+	defer db.arrowPool.release(pc)
 
-	rdr, err := arrow.QueryContext(ctx, query)
+	rdr, err := pc.arrow.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("query: failed to execute query: %w", err)
 	}
@@ -372,14 +339,15 @@ func (db *DB) WriteArrow(ctx context.Context, query string, allowedSchemas []str
 
 // SECURITY: writeArrow executes without policy validation. Call it only after validateQuery succeeds for the same query
 // and request-scoped allowed schemas.
+// FORK: acquires a pooledArrowConn from db.arrowPool instead of the old getArrowConn/putArrowConn pairing.
 func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
-	arrow, err := db.getArrowConn(ctx)
+	pc, err := db.arrowPool.acquire(ctx)
 	if err != nil {
 		return err
 	}
-	defer db.putArrowConn(arrow)
+	defer db.arrowPool.release(pc)
 
-	rdr, err := arrow.QueryContext(ctx, query)
+	rdr, err := pc.arrow.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("query: failed to execute query: %w", err)
 	}

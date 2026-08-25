@@ -2,6 +2,8 @@ package query
 
 import (
 	"context"
+	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -64,6 +66,8 @@ func (e ErrorDetails) Is(target error) bool {
 }
 
 // ValidateSQL validates the given SQL query using the provided validators
+// FORK: parses the AST via db.db.QueryRowContext (unchanged) but delegates AST validation to the extracted
+// validateParsedAST, which is shared with the connection-pinned validateSQLOn below.
 func (db *DB) ValidateSQL(ctx context.Context, sql string, validators ...Validator) error {
 	// Qualify the built-in to prevent database macros from shadowing validation.
 	serializeSQL := fmt.Sprintf("SELECT system.main.json_serialize_sql(%s, skip_default := true, skip_empty := true, skip_null := true) as ast", quoteLiteral(sql))
@@ -75,6 +79,12 @@ func (db *DB) ValidateSQL(ctx context.Context, sql string, validators ...Validat
 		return fmt.Errorf("failed to parse SQL query: %w", err)
 	}
 
+	return validateParsedAST(m, validators...)
+}
+
+// FORK: validateParsedAST is the AST-validation half extracted from ValidateSQL's body, so that it can be reused by
+// validateSQLOn, which parses the AST on a specific driver.Conn instead of through db.db.
+func validateParsedAST(m map[string]any, validators ...Validator) error {
 	parseError, ok := m["error"].(bool)
 	if !ok {
 		return errors.New("invalid SQL parser response: missing error status")
@@ -94,27 +104,84 @@ func (db *DB) ValidateSQL(ctx context.Context, sql string, validators ...Validat
 	}
 
 	// Extract all schema references, including tables without an explicit schema reference, from the AST
-	for _, stmt := range statements {
-		stmtMap, ok := stmt.(map[string]any)
+	for _, statement := range statements {
+		mapped, ok := statement.(map[string]any)
 		if !ok {
-			return fmt.Errorf("invalid statement format: %v", stmt)
+			return fmt.Errorf("invalid statement format: %v", statement)
 		}
 
-		keyStack := make([]string, 0, 10)
-
-		walkAST(stmtMap, keyStack, validators)
+		walkAST(mapped, make([]string, 0, 10), validators)
 	}
 
-	var combinedErrs []error
-
+	var combined []error
 	for _, validator := range validators {
-		validationErrs := validator.Validate()
-		if len(validationErrs) > 0 {
-			combinedErrs = append(combinedErrs, validationErrs...)
-		}
+		combined = append(combined, validator.Validate()...)
 	}
+	return errors.Join(combined...)
+}
 
-	return errors.Join(combinedErrs...)
+// FORK: new function. validateSQLOn parses and validates SQL on a specific driver.Conn (bypassing db.db), so that
+// parsing participates in a transaction already open on conn.
+func validateSQLOn(ctx context.Context, conn driver.Conn, submitted string, validators ...Validator) error {
+	statement := fmt.Sprintf("SELECT system.main.json_serialize_sql(%s, skip_default := true, skip_empty := true, skip_null := true) AS ast", quoteLiteral(submitted))
+	value, err := scalarOn(ctx, conn, statement)
+	if err != nil {
+		return fmt.Errorf("failed to parse SQL query: %w", err)
+	}
+	var parsed map[string]any
+	switch value := value.(type) {
+	case map[string]any:
+		parsed = value
+	case string:
+		if err := json.Unmarshal([]byte(value), &parsed); err != nil {
+			return fmt.Errorf("invalid SQL parser JSON: %w", err)
+		}
+	case []byte:
+		if err := json.Unmarshal(value, &parsed); err != nil {
+			return fmt.Errorf("invalid SQL parser JSON: %w", err)
+		}
+	default:
+		return fmt.Errorf("invalid SQL parser response type %T", value)
+	}
+	return validateParsedAST(parsed, validators...)
+}
+
+// FORK: new type. relationCollector is a Validator that records every BASE_TABLE reference the AST walk visits, so
+// callers of validateQueryOn can run a live catalog check (Task 6) against exactly the tables the query touches.
+// It never rejects anything itself (Validate always returns nil); it only collects.
+type relationCollector struct{ refs map[tableRef]struct{} }
+
+func newRelationCollector() *relationCollector {
+	return &relationCollector{refs: make(map[tableRef]struct{})}
+}
+
+func (v *relationCollector) CheckNode(node map[string]any, _ []string) {
+	if node["type"] != "BASE_TABLE" {
+		return
+	}
+	schema, _ := node["schema_name"].(string)
+	name, _ := node["table_name"].(string)
+	if schema != "" && name != "" {
+		v.refs[tableRef{SchemaName: strings.TrimPrefix(schema, "schema_name:"), TableName: name}] = struct{}{}
+	}
+}
+
+func (*relationCollector) Validate() []error { return nil }
+
+// list returns the collected table references sorted deterministically by schema then table name, so downstream
+// catalog checks (Task 6) and execution (Task 7) see a stable order.
+func (v *relationCollector) list() []tableRef {
+	refs := make([]tableRef, 0, len(v.refs))
+	for ref := range v.refs {
+		refs = append(refs, ref)
+	}
+	slices.SortFunc(refs, func(a, b tableRef) int {
+		if n := strings.Compare(a.SchemaName, b.SchemaName); n != 0 {
+			return n
+		}
+		return strings.Compare(a.TableName, b.TableName)
+	})
+	return refs
 }
 
 func stringField(m map[string]any, key string) string {

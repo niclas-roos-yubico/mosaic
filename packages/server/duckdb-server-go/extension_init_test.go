@@ -68,3 +68,22 @@ func TestExtensionInitializerConcurrentCallsStillInstallOnce(t *testing.T) {
 	}
 	require.Equal(t, 3, installs)
 }
+
+// contextCheckingExecer fails ExecContext once its context is done, so a test can prove whether
+// the context newExtensionInitializer captured is still tied to a caller's cancellation.
+type contextCheckingExecer struct{}
+
+func (contextCheckingExecer) ExecContext(ctx context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return driver.RowsAffected(0), nil
+}
+
+func TestNewExtensionInitializerDetachesFromCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	init := newExtensionInitializer(ctx, "json")
+	cancel()
+	require.NoError(t, init(contextCheckingExecer{}),
+		"initialize must not observe cancellation of the ctx passed to newExtensionInitializer")
+}

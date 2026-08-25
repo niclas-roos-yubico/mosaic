@@ -18,8 +18,14 @@ type extensionInitializer struct {
 	installErr error
 }
 
+// newExtensionInitializer retains ctx in the returned closure, which fires on every future
+// physical connection -- including ones opened long after startup, e.g. during pool growth or a
+// later graceful-shutdown drain. context.WithoutCancel detaches it from the caller's
+// cancellation/deadline so a shutdown signal on the original ctx cannot fail a new connection's
+// INSTALL/LOAD sequence, which (*duckdb.Connector).Connect would otherwise close and reject
+// silently.
 func newExtensionInitializer(ctx context.Context, raw string) func(driver.ExecerContext) error {
-	init := &extensionInitializer{ctx: ctx, raw: raw, names: extensionNames(raw)}
+	init := &extensionInitializer{ctx: context.WithoutCancel(ctx), raw: raw, names: extensionNames(raw)}
 	return init.initialize
 }
 

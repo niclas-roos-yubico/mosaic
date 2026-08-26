@@ -131,27 +131,12 @@ func run() int {
 		return 1
 	}
 
-	// FORK: Quack bootstrap (Task 9/10). Starts before the public listener; the returned connection is
-	// held via defer for the lifetime of the process so the writer stays alive. No error path below
-	// logs the descriptor number, token, config, or payload.
-	var quackConn driver.Conn
-	if *platform.quackBootstrapFD >= 3 {
-		cfg, err := readQuackBootstrapFD(*platform.quackBootstrapFD)
-		if err != nil {
-			logger.Error("main: failed to read Quack bootstrap", "error", err)
-			return 1
-		}
-		quackConn, err = startQuack(ctx, connector, cfg)
-		if err != nil {
-			logger.Error("main: failed to start Quack", "error", err)
-			return 1
-		}
-		defer func() {
-			if err := quackConn.Close(); err != nil {
-				logger.Error("main: failed to close Quack connection", "error", err)
-			}
-		}()
+	// FORK[quack-bootstrap]: must start before the public listener; the connection is held for the process lifetime
+	closeQuack, err := startQuackIfConfigured(ctx, connector, *platform.quackBootstrapFD, logger)
+	if err != nil {
+		return 1
 	}
+	defer closeQuack() // FORK[quack-bootstrap]: the bootstrap writer dies if this connection closes early
 
 	// FORK: platform session JWT validator (Task 2/10). Audience is hardcoded, never a flag.
 	validator, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{

@@ -82,11 +82,10 @@ func run() int {
 		}
 	}
 
-	// FORK: the connector now installs extensions via the Task 8 install-once initializer instead of
-	// an inline closure that re-ran ParseAndInstall (a full INSTALL) on every physical connection. See
-	// extension_init.go: only the first connection INSTALLs; every later connection only LOADs, which
-	// (unlike INSTALL) does not require external access.
-	connector, err := duckdb.NewConnector(*dbPath, newExtensionInitializer(ctx, *extensionsStr))
+	extensionInit := newExtensionInitializer(ctx, *extensionsStr) // FORK[extension-initializer]: install-once state must be created once, not per connection
+	connector, err := duckdb.NewConnector(*dbPath, func(execer driver.ExecerContext) error {
+		return extensionInit(execer) // FORK[extension-initializer]: only the first connection INSTALLs; later ones only LOAD, which does not need external access
+	})
 	if err != nil {
 		logger.Error("main: error creating duckdb connector", "error", err)
 		return 1
@@ -104,29 +103,21 @@ func run() int {
 		return 1
 	}
 
-	// FORK: the reviewed function allowlist and remote-URI-literal rejection are now unconditional
-	// (Task 10), not opt-in: query.WithFunctionAllowlist always runs, and functionAllowlist.values is
-	// nil when --function-allowlist is omitted, so functionset.DefaultFunctions still applies via
-	// query.resolveFunctionAllowlist. query.WithFunctionBlocklist keeps upstream's call site; startup
-	// validation guarantees the slice is empty.
 	queryOptions := []query.OptionFunc{
 		query.WithMaxConnections(*poolSize),
 		query.WithMaxCacheEntries(*maxCacheEntries),
 		query.WithMaxCacheBytes(*maxCacheBytes),
 		query.WithTTL(ttl),
 		query.WithLogger(logger),
-		query.WithFunctionAllowlist(query.FunctionAllowlistOptions{Include: functionAllowlist.values}),
-		query.WithRemoteURILiteralRejection(),
 		query.WithFunctionBlocklist(functionBlocklist),
 	}
-	if *platform.disableResultCache {
-		queryOptions = append(queryOptions, query.WithResultCacheDisabled())
-	}
-	if *platform.enableExternalAccess {
-		queryOptions = append(queryOptions, query.WithTransactionalCatalogGuard(query.TransactionOptions{
-			Timeout: *platform.transactionTimeout, MaxResultBytes: *platform.maxQueryResultBytes,
+	if functionAllowlist.set {
+		queryOptions = append(queryOptions, query.WithFunctionAllowlist(query.FunctionAllowlistOptions{
+			Include: functionAllowlist.values,
 		}))
 	}
+	// FORK[query-options-hardened]: the data plane's options are unconditional, so they append after upstream's assembly
+	queryOptions = append(queryOptions, platform.queryOptions(functionAllowlist.values)...)
 
 	db, err := query.New(ctx, connector, queryOptions...)
 	if err != nil {

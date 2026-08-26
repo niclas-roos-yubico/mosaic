@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 // platformConfig owns every flag, validation and construction step the platform data plane adds to
@@ -75,4 +77,27 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 	err := fmt.Errorf("main: %s", reason)
 	fmt.Fprintln(os.Stderr, err)
 	return err
+}
+
+// queryOptions returns the data plane's query options. run() appends them after upstream's own
+// assembly, which makes the reviewed function allowlist and remote-URI-literal rejection
+// unconditional rather than opt-in: an omitted --function-allowlist leaves Include nil, and
+// query.resolveFunctionAllowlist still applies functionset.DefaultFunctions. When
+// --function-allowlist was passed, upstream already appended an identical WithFunctionAllowlist;
+// option funcs are last-write-wins over Options.FunctionAllowlist, so the duplicate is a no-op and
+// ours -- appended last -- is the one that lands.
+func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionFunc {
+	options := []query.OptionFunc{
+		query.WithFunctionAllowlist(query.FunctionAllowlistOptions{Include: allowlistInclude}),
+		query.WithRemoteURILiteralRejection(),
+	}
+	if *p.disableResultCache {
+		options = append(options, query.WithResultCacheDisabled())
+	}
+	if *p.enableExternalAccess {
+		options = append(options, query.WithTransactionalCatalogGuard(query.TransactionOptions{
+			Timeout: *p.transactionTimeout, MaxResultBytes: *p.maxQueryResultBytes,
+		}))
+	}
+	return options
 }

@@ -23,6 +23,16 @@ Today it is 54. Every one is a liability with a recurring cost.
 
 ## Rules
 
+### 0. None of this outranks the hardening
+
+Every rule in this document exists to reduce **rebase cost**. Rebase cost never
+justifies a weaker security posture. If a rule below and the hardening pull in
+opposite directions, the hardening wins and the exception goes in the inventory
+— that is a normal, expected outcome, not a failure to comply.
+
+Be especially wary when a rule makes a security control *tidier*. Tidier is not
+the goal; the goal is that the control cannot be bypassed. See rule 4.
+
 ### 1. Stay inside this directory
 
 All fork divergence lives under `packages/server/duckdb-server-go/`. Nothing
@@ -65,6 +75,18 @@ The exemplar is in this package: `pkg/server/schema_resolver.go` is 41 lines of
 fork logic behind **one** marker in `options.go`, because `pkg/server` gained a
 hook rather than an implementation. Copy that shape.
 
+The lever that makes this achievable in Go: **methods on a type compile from any
+file in the package.** A method on upstream's `handler` or `DB` can live in a
+fork-owned file with no upstream edit at all. Almost any fork body can move; what
+has to stay behind is the call.
+
+**This applies to tests too.** A fork test living in an upstream `_test.go` file
+is pure cost with no upside: test files are where upstream *appends* most freely,
+so a fork test sitting at the bottom of one is sitting exactly where the next
+upstream test will land. Put fork tests in a fork-owned `_foo_fork_test.go`. They
+are in the same package, so nothing is lost — and unlike production hooks, a test
+has no call site that must stay behind, so the move is always free.
+
 ### 4. A hook is one statement
 
 A marked site should be a single statement or declaration. If your edit inside
@@ -73,6 +95,26 @@ an upstream file has a *body*, the body is in the wrong file.
 Named exceptions live in the inventory. `execCommand`'s exec-denial gate is the
 current legitimate one: a four-line guard whose entire purpose is to return
 before upstream's code runs.
+
+**Do not buy a shorter hook with a weaker guarantee.** Prefer a mechanism the
+compiler enforces over one that depends on a caller remembering. An extra
+parameter threaded through an upstream signature is checked at every call site
+and cannot be omitted; a value smuggled through a `context.Context`, a field set
+during setup, or a convention documented in a comment all fail *silently* when
+some path skips them. In a security control — authorization, expiry, denial
+gates — that silence is the whole problem.
+
+So: a four-line guard the compiler protects beats a one-line hook it doesn't.
+Retiring an exception in this list is not worth a fail-open. If you find yourself
+merging two security concerns into one call site to satisfy this rule, that is
+the signal to stop and take the exception instead.
+
+**State the target as a property, not a count.** "No marked site has a body, and
+deletions in this file are at or below N" is the bar. A raw marker count invites
+exactly the wrong optimisation — merging unrelated hooks to make one number
+smaller, which is how you arrive at a tidier, weaker design. Two adjacent
+one-line hooks are cheaper to rebase than one clever hook that carries two
+concerns.
 
 ### 5. Upstream the seam, not the feature
 
@@ -97,9 +139,25 @@ See the runbook at the bottom.
 
 ### 7. Find out early
 
-`git rerere` is enabled in this repo — leave it on. A nightly CI job trial-merges
-upstream `main` and reports conflicts without blocking, so a conflict surfaces
-the day upstream creates it rather than a hundred commits later.
+Two mechanisms. **Neither is set up yet** — this section describes the intended
+state, and says so rather than pretending.
+
+**`git rerere`** reuses recorded conflict resolutions, turning repeated
+resolution across overlapping regions into a one-time cost. It is **not**
+currently enabled — `git config rerere.enabled` returns empty, locally and
+globally. Turn it on before the next sync:
+
+```sh
+git config rerere.enabled true
+```
+
+Until it is on, the `-c rerere.enabled=false` guard in the runbook below is a
+no-op. That guard is still correct to write, because it must not become a
+silent no-op *after* rerere is enabled.
+
+**A nightly trial-merge CI job** against upstream `main`, reporting conflicts
+without blocking, so a conflict surfaces the day upstream creates it rather than
+a hundred commits later. Not built yet either.
 
 ## Marker syntax
 
@@ -157,7 +215,10 @@ type handler struct {
       why additive didn't work.
 - [ ] Nothing changed outside this directory except `root_allowlist` entries.
 - [ ] Markers inside aligned blocks are end-of-line.
-- [ ] `go test ./... -race` green.
+- [ ] No fork test left sitting in an upstream test file — see below.
+- [ ] Build and test **with the same build tag CI uses**, or you are not testing
+      what CI tests (`.github/workflows/test.yml`):
+      `go build -tags=duckdb_arrow ./...` and `go test -tags=duckdb_arrow -race ./...`
 - [ ] `pkg/platformauth/regression_test.go` passes **unmodified**. If a security
       regression test needed editing, you changed behaviour — that is a defect in
       your change, not in the test.
@@ -170,6 +231,20 @@ more effort.
 
 1. `git fetch origin` (uwdata); pick the release tag to sync to.
 2. Trial-merge on a throwaway branch; record conflicted files and hunks; abort.
+   **Measure with `git -c rerere.enabled=false merge ...`.** Once rerere is on
+   (rule 7), a cached resolution makes a conflict vanish from the count without
+   the underlying divergence having gone anywhere, silently understating every
+   before/after measurement you take.
+
+   **A zero-conflict result may prove nothing.** Check how often upstream
+   actually touches the files you changed:
+   `git log --oneline <upstream_base> -- <path> | wc -l`. As of v0.31.0 that is
+   2 commits for `pkg/server/server.go`, 3 for `pkg/query/query.go`, 9 for
+   `main.go` — so a clean merge in `pkg/server` is the expected outcome whether
+   or not the thinning helped. Where churn is that low, report the churn figure
+   alongside the conflict count, and treat a synthetic probe (merge against a
+   branch that deliberately edits the upstream hunks the fork sits on) as
+   supporting evidence — clearly labelled synthetic, because it is.
 3. Merge the tag into a sync branch off `fork/main`.
 4. Resolve. Every resolution inside an upstream file still obeys rules 2 and 4 —
    **a conflict is not a licence to inline.**

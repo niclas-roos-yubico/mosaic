@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"syscall"
 	"time"
@@ -118,4 +119,30 @@ func readQuackBootstrapFD(fd int) (quackBootstrapConfig, error) {
 		return quackBootstrapConfig{}, fmt.Errorf("quack bootstrap: set read deadline: %w", err)
 	}
 	return readQuackBootstrap(file)
+}
+
+// startQuackIfConfigured gates the Quack bootstrap on fd and owns the lifetime of the resulting
+// connection. It runs before the public listener, and the returned close function must be deferred
+// for the whole process lifetime or the writer dies. On success the closer is always non-nil --
+// including when Quack is disabled -- so run() defers it unconditionally with no branch. No path
+// here logs the descriptor number, the token, the config, or the payload.
+func startQuackIfConfigured(ctx context.Context, connector *duckdb.Connector, fd int, logger *slog.Logger) (func(), error) {
+	if fd < 3 {
+		return func() {}, nil
+	}
+	cfg, err := readQuackBootstrapFD(fd)
+	if err != nil {
+		logger.Error("main: failed to read Quack bootstrap", "error", err)
+		return nil, err
+	}
+	conn, err := startQuack(ctx, connector, cfg)
+	if err != nil {
+		logger.Error("main: failed to start Quack", "error", err)
+		return nil, err
+	}
+	return func() {
+		if err := conn.Close(); err != nil {
+			logger.Error("main: failed to close Quack connection", "error", err)
+		}
+	}, nil
 }

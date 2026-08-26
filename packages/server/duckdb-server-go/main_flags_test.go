@@ -50,6 +50,7 @@ func TestBinaryRejectsUnsafeModes(t *testing.T) {
 		{name: "negative transaction timeout", args: []string{jwks, "--query-transaction-timeout=-1s"}, want: "--query-transaction-timeout must be positive"},
 		{name: "zero result limit", args: []string{jwks, "--max-query-result-bytes=0"}, want: "--max-query-result-bytes must be positive"},
 		{name: "function blocklist", args: []string{jwks, "--function-blocklist=read_csv"}, want: "function blocklist is not permitted"},
+		{name: "schema match headers", args: []string{jwks, "--schema-match-headers=X-Tenant-Id"}, want: "--schema-match-headers is not permitted"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,7 +72,6 @@ func TestUsageAdvertisesHardenedFlags(t *testing.T) {
 	} {
 		require.Contains(t, output, flag)
 	}
-	require.NotContains(t, output, "schema-match-headers")
 }
 
 func TestREADMEDocumentsPlatformSecurityContract(t *testing.T) {

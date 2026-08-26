@@ -19,7 +19,7 @@ five-line edit inside `query.go`.
 
 The number we drive down is the **count of carried modifications**, tracked in
 [`fork-inventory.json`](fork-inventory.json). Not lines, not files — modifications.
-Today it is 54. Every one is a liability with a recurring cost.
+Today it is 55. Every one is a liability with a recurring cost.
 
 ## Rules
 

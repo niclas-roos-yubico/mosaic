@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 var errNoCommandAuthorizer = errors.New("server: authorizer returned no command authorizer")
@@ -54,6 +54,14 @@ func classifyError(err error) errorResponse {
 		paramsError  queryParamsError
 	)
 	switch {
+	// FORK: Task 7 guarded-execution coordinator errors. Checked before the 400/403 cases below so a byte-cap or
+	// deadline hit is never miscategorized as a generic bad_request.
+	case errors.Is(err, query.ErrResultTooLarge):
+		response.status = http.StatusRequestEntityTooLarge
+		response.code = "response_too_large"
+	case errors.Is(err, query.ErrQueryTimeout):
+		response.status = http.StatusGatewayTimeout
+		response.code = "query_timeout"
 	case errors.Is(err, query.ErrExecWithValidation),
 		errors.Is(err, query.ErrUnsupportedStatement),
 		errors.As(err, &errorDetails),

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/extensions"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/extensions"
 )
 
 func TestParseAndInstall(t *testing.T) {

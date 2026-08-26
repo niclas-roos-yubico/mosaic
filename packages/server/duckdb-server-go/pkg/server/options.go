@@ -55,9 +55,11 @@ type config struct {
 	logger             *slog.Logger
 	authorizer         Authorizer
 	schemaMatchHeaders []string
-	cors               CORSOptions
-	corsProtection     *http.CrossOriginProtection
-	websocket          WebSocketOptions
+	// FORK: JWT-derived schema/expiry resolution, see schema_resolver.go.
+	schemaResolver SchemaResolver
+	cors           CORSOptions
+	corsProtection *http.CrossOriginProtection
+	websocket      WebSocketOptions
 }
 
 func defaultConfig() config {

@@ -19,7 +19,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/stretchr/testify/require"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 type spyCommandExecutor struct {

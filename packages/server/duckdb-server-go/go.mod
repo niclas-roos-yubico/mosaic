@@ -1,4 +1,4 @@
-module github.com/uwdata/mosaic/packages/server/duckdb-server-go
+module github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go
 
 go 1.25.0
 
@@ -6,6 +6,7 @@ require (
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/coder/websocket v1.8.15
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
+	github.com/lestrrat-go/jwx/v3 v3.1.1
 	github.com/maypok86/otter/v2 v2.3.0
 	github.com/rs/cors v1.11.1
 	github.com/stretchr/testify v1.11.1
@@ -14,6 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/duckdb/duckdb-go-bindings v0.10505.0 // indirect
 	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10505.0 // indirect
 	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10505.0 // indirect
@@ -26,9 +28,18 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
+	github.com/lestrrat-go/dsig v1.2.1 // indirect
+	github.com/lestrrat-go/dsig-secp256k1 v1.0.0 // indirect
+	github.com/lestrrat-go/httpcc v1.0.1 // indirect
+	github.com/lestrrat-go/httprc/v3 v3.0.5 // indirect
+	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/segmentio/asm v1.2.1 // indirect
+	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

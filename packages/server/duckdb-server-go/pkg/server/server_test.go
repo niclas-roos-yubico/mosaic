@@ -15,7 +15,7 @@ import (
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/query"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 func setupTestDB(t *testing.T, opts ...query.OptionFunc) *query.DB {
@@ -270,6 +270,20 @@ func TestHandleHTTPQueryParamsErrors(t *testing.T) {
 			require.Equal(t, tt.wantBody, res.Body.String())
 		})
 	}
+}
+
+// FORK: Task 7 guarded-execution coordinator error mapping (see errors.go's classifyError).
+func TestClassifyResultTooLarge(t *testing.T) {
+	got := classifyError(query.ErrResultTooLarge)
+	require.Equal(t, http.StatusRequestEntityTooLarge, got.status)
+	require.Equal(t, "response_too_large", got.code)
+}
+
+// FORK: Task 7 guarded-execution coordinator error mapping (see errors.go's classifyError).
+func TestClassifyQueryTimeout(t *testing.T) {
+	got := classifyError(query.ErrQueryTimeout)
+	require.Equal(t, http.StatusGatewayTimeout, got.status)
+	require.Equal(t, "query_timeout", got.code)
 }
 
 func TestGetAllowedSchemasTrimsHeaderNames(t *testing.T) {

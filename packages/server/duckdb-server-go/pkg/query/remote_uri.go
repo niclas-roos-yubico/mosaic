@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/uwdata/mosaic/packages/server/duckdb-server-go/pkg/functionset/remoteread"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/functionset/remoteread"
 )
 
 // Sources are the DuckDB 1.5.5-pinned filesystem handlers listed in ../functionset/remoteread/README.md.

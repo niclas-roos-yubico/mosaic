@@ -27,6 +27,16 @@ import (
 var (
 	errJWKSUnavailable = errors.New("jwt: jwks unavailable")
 	errKeyOrSignature  = errors.New("jwt: key resolution or signature verification failed")
+
+	// errMissingClaim is the sentinel wrapped by the four manual required-claim checks in
+	// parseAndValidate below (sub, jti, exp, allowed_schemas). jwx's own
+	// jwt.MissingRequiredClaimError is never produced by this validator's option set -- it has no
+	// jwt.WithRequiredClaim options configured, so jwx itself never treats an absent claim as a
+	// validation failure -- meaning these hand-written checks are the only real source of a
+	// "missing claim" rejection. Without this sentinel, classifyValidationError (platformauth.go)
+	// had no way to distinguish them from any other failure, and every one of them logged reason
+	// "other" instead of "missing_required_claim".
+	errMissingClaim = errors.New("jwt: missing required claim")
 )
 
 // SessionClaims are the validated claims extracted from a Platform session JWT.
@@ -316,28 +326,28 @@ func (v *JWTValidator) parseAndValidate(ctx context.Context, tokenStr string, ke
 	// In jwx/v3.1.1, Subject() returns (string, bool).
 	sub, ok := tok.Subject()
 	if !ok || sub == "" {
-		return nil, fmt.Errorf("jwt: missing required claim 'sub'")
+		return nil, fmt.Errorf("%w 'sub'", errMissingClaim)
 	}
 
 	// Extract required claim: jti.
 	// In jwx/v3.1.1, JwtID() returns (string, bool).
 	jti, ok := tok.JwtID()
 	if !ok || jti == "" {
-		return nil, fmt.Errorf("jwt: missing required claim 'jti'")
+		return nil, fmt.Errorf("%w 'jti'", errMissingClaim)
 	}
 
 	// Extract required claim: exp.
 	// In jwx/v3.1.1, Expiration() returns (time.Time, bool).
 	expiresAt, ok := tok.Expiration()
 	if !ok || expiresAt.IsZero() {
-		return nil, fmt.Errorf("jwt: missing required claim 'exp'")
+		return nil, fmt.Errorf("%w 'exp'", errMissingClaim)
 	}
 
 	// Extract allowed_schemas.
 	// In jwx/v3.1.1, Get(key, &dst) writes into dst and returns error.
 	// After JSON round-trip, a []string private claim comes back as []interface{}.
 	if !tok.Has("allowed_schemas") {
-		return nil, fmt.Errorf("jwt: missing required claim 'allowed_schemas'")
+		return nil, fmt.Errorf("%w 'allowed_schemas'", errMissingClaim)
 	}
 	var rawSchemas interface{}
 	if getErr := tok.Get("allowed_schemas", &rawSchemas); getErr != nil {

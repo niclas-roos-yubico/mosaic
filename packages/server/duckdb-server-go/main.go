@@ -170,7 +170,7 @@ func run() int {
 	// external access is still enabled, and only then does this latch drop it -- globally and
 	// irreversibly, per external_access_global_test.go -- before any query-serving connection needs
 	// one. Quack mode (below) requires --enable-external-access=true and is mutually exclusive with
-	// this branch, so it is never skipped when Quack is active.
+	// this branch, so this branch is always skipped -- never entered -- when Quack is active.
 	if !*enableExternalAccess {
 		if err := db.DisableExternalAccess(ctx); err != nil {
 			logger.Error("main: failed to latch external access", "error", err)

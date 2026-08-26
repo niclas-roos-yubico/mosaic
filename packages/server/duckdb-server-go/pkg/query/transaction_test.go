@@ -74,6 +74,29 @@ func guardedTransactionDB(t *testing.T, seedSQL string, options TransactionOptio
 	return db, connector
 }
 
+// TestExecuteGuardedRejectsEmptySchemaList covers I3: newValidators (query.go) only installs the
+// base-table validator when len(allowedSchemas) > 0, so an empty schemas slice would otherwise
+// leave only the function allowlist, URI-literal rejection, and the catalog's physical-table check
+// active on the path through executeGuarded -- none of which asks "is this schema authorized?".
+// Without the guard at the top of executeGuarded, this query would succeed and return
+// "other-tenant-secret", exactly as described in the finding: "SELECT * FROM other_tenant.secret
+// would pass." This is exercised directly at the query.DB level (not through pkg/server) because
+// the point of the fix is that this package's own guarantee must not depend on a caller elsewhere
+// (schema resolution, JWT claim validation, header parsing) doing the right thing first.
+func TestExecuteGuardedRejectsEmptySchemaList(t *testing.T) {
+	db, _ := guardedTransactionDB(t,
+		`CREATE SCHEMA other_tenant; CREATE TABLE other_tenant.secret(value VARCHAR); INSERT INTO other_tenant.secret VALUES ('other-tenant-secret')`,
+		TransactionOptions{Timeout: time.Second, MaxResultBytes: 1 << 20})
+
+	data, _, err := db.QueryJSON(t.Context(), `SELECT * FROM other_tenant.secret`, []string{}, false)
+	require.ErrorIs(t, err, ErrAccessDenied)
+	require.NotContains(t, string(data), "other-tenant-secret")
+
+	arrowData, _, err := db.QueryArrow(t.Context(), `SELECT * FROM other_tenant.secret`, []string{}, false)
+	require.ErrorIs(t, err, ErrAccessDenied)
+	require.Empty(t, arrowData)
+}
+
 func TestGuardedQueryReusesPoolSizeOne(t *testing.T) {
 	db, _ := guardedTransactionDB(t,
 		`CREATE SCHEMA tenant_a; CREATE TABLE tenant_a.metrics(v INTEGER); INSERT INTO tenant_a.metrics VALUES (1)`,

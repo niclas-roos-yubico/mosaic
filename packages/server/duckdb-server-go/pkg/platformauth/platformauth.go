@@ -82,11 +82,18 @@ const (
 
 // classifyValidationError maps a Validate failure to one of the fixed reason
 // codes above using errors.Is against jwx's sentinel errors (whose messages
-// never interpolate claim values) and this package's own errJWKSUnavailable /
-// errKeyOrSignature sentinels (see jwt.go), which cover the one place a
-// validation error can carry attacker-controlled content — the token
-// header's "kid" — so that content is classified, never formatted into a log
-// line or response.
+// never interpolate claim values) and this package's own errMissingClaim /
+// errJWKSUnavailable / errKeyOrSignature sentinels (see jwt.go).
+// errKeyOrSignature covers the one place a validation error can carry
+// attacker-controlled content — the token header's "kid" — so that content is
+// classified, never formatted into a log line or response.
+//
+// jwt.MissingRequiredClaimError() is checked for completeness (in case a
+// future jwt.WithRequiredClaim option is ever added), but it is never
+// actually produced by this validator's option set today: the four required
+// claims (sub, jti, exp, allowed_schemas) are enforced by hand-written checks
+// in parseAndValidate, which is why those checks wrap errMissingClaim
+// themselves instead of relying on jwx to classify them.
 func classifyValidationError(err error) string {
 	switch {
 	case errors.Is(err, jwt.TokenExpiredError()):
@@ -98,6 +105,8 @@ func classifyValidationError(err error) string {
 	case errors.Is(err, jwt.InvalidIssuerError()):
 		return reasonInvalidIssuer
 	case errors.Is(err, jwt.MissingRequiredClaimError()):
+		return reasonMissingClaim
+	case errors.Is(err, errMissingClaim):
 		return reasonMissingClaim
 	case errors.Is(err, errJWKSUnavailable):
 		return reasonJWKSUnavailable

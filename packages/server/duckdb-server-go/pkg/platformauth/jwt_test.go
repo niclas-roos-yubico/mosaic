@@ -1,10 +1,12 @@
 package platformauth_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -493,5 +495,69 @@ func TestMissingExpirationClaim(t *testing.T) {
 	_, err = v.Validate(t.Context(), string(signed))
 	if err == nil || !strings.Contains(err.Error(), "missing required claim 'exp'") {
 		t.Fatalf("Validate() error = %v, want missing exp", err)
+	}
+}
+
+// TestMissingClaimRejectionIsClassifiedNotOther covers M8: the four manual required-claim checks
+// in jwt.go's parseAndValidate (sub, jti, exp, allowed_schemas) must be classified by
+// classifyValidationError (platformauth.go) as "missing_required_claim", not fall through to the
+// catch-all "other" bucket. jwx's own jwt.MissingRequiredClaimError is never produced by this
+// validator's option set (no jwt.WithRequiredClaim is configured), so before wrapping these checks
+// in the errMissingClaim sentinel, every real missing-claim rejection was indistinguishable in the
+// logs from any other unclassified failure -- exactly the diagnostic loss the classification work
+// in Middleware exists to prevent. classifyValidationError itself is unexported, so this observes
+// its effect the same way a real deployment would: through Middleware's sanitized log line.
+func TestMissingClaimRejectionIsClassifiedNotOther(t *testing.T) {
+	priv, jwksHandler := genTestKey(t)
+	srv := httptest.NewServer(jwksHandler)
+	defer srv.Close()
+
+	v, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{
+		JWKSURL: srv.URL, Issuer: "https://platform.example.com/platform",
+		Audience: "platform-data-plane", Algorithms: []string{"RS256"},
+	})
+	if err != nil {
+		t.Fatalf("NewJWTValidator: %v", err)
+	}
+
+	// Mint a token with every standard claim present except 'sub'.
+	now := time.Now()
+	tok := jwt.New()
+	_ = tok.Set(jwt.IssuerKey, "https://platform.example.com/platform")
+	_ = tok.Set(jwt.AudienceKey, []string{"platform-data-plane"})
+	_ = tok.Set(jwt.IssuedAtKey, now)
+	_ = tok.Set(jwt.NotBeforeKey, now)
+	_ = tok.Set(jwt.ExpirationKey, now.Add(time.Hour))
+	_ = tok.Set(jwt.JwtIDKey, "jti-no-sub")
+	_ = tok.Set("allowed_schemas", []string{"tenant_a"})
+	privKey, err := jwk.Import(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = privKey.Set(jwk.KeyIDKey, "test-kid-1")
+	_ = privKey.Set(jwk.AlgorithmKey, jwa.RS256())
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256(), privKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("next handler must not be called for a rejected session")
+	})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(platformauth.SessionHeader, string(signed))
+	res := httptest.NewRecorder()
+	platformauth.Middleware(v, logger)(next).ServeHTTP(res, req)
+
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", res.Code)
+	}
+	if !strings.Contains(logBuf.String(), "missing_required_claim") {
+		t.Fatalf("log = %q, want it to contain reason=missing_required_claim", logBuf.String())
+	}
+	if strings.Contains(logBuf.String(), "reason=other") {
+		t.Fatalf("log = %q, a real missing-claim rejection must not be bucketed as reason=other", logBuf.String())
 	}
 }

@@ -50,16 +50,20 @@ func (g *txGuard) commit() (ok bool, err error) {
 // rollback finishes the transaction with Rollback, unless it was already finished by a prior commit or rollback,
 // in which case it is a safe no-op. ok reports whether this call was the one that actually performed the
 // rollback, so callers (specifically executeGuarded's cleanup) can tell "I rolled it back" from "it was already
-// finished" without risking a second driver call either way.
-func (g *txGuard) rollback() (ok bool) {
+// finished" without risking a second driver call either way. err is the driver's Rollback error (nil when ok is
+// false, since no driver call was made): the duckdb driver clears its internal "in transaction" bookkeeping before
+// issuing ROLLBACK, so a failed Rollback leaves the physical connection genuinely still inside a DuckDB
+// transaction even though the driver believes otherwise. A caller that returns such a connection to the pool
+// would have its next BeginTx fail; see the reusable = false handling at this method's call site in
+// executeGuarded's deferred cleanup below.
+func (g *txGuard) rollback() (ok bool, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.done {
-		return false
+		return false, nil
 	}
 	g.done = true
-	_ = g.tx.Rollback()
-	return true
+	return true, g.tx.Rollback()
 }
 
 // watchTransaction starts a goroutine that rolls back the transaction behind guard if ctx is done before stop is
@@ -80,7 +84,10 @@ func watchTransaction(ctx context.Context, guard *txGuard) (*atomic.Bool, func()
 		defer close(exited)
 		select {
 		case <-ctx.Done():
-			if guard.rollback() {
+			// The watchdog path is already contained regardless of whether the driver's Rollback call itself
+			// succeeds: watchdogRolledBack becoming true unconditionally forces reusable = false in
+			// executeGuarded's cleanup below, so a failed Rollback's error is intentionally not inspected here.
+			if ok, _ := guard.rollback(); ok {
 				rolledBack.Store(true)
 			}
 		case <-stopCh:
@@ -104,6 +111,17 @@ func watchTransaction(ctx context.Context, guard *txGuard) (*atomic.Bool, func()
 // authorization must precede any cache read, and the response must be committed before any byte reaches the
 // client.
 func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []string, format responseFormat) ([]byte, error) {
+	// I3: newValidators (query.go) only installs the base-table validator when len(allowedSchemas) > 0, so an
+	// empty schemas here would leave only the function allowlist, URI-literal rejection, and the catalog's
+	// physical-table check active -- none of which asks "is this schema authorized?" -- and checkCatalogOn would
+	// happily confirm any physical table in any schema. Not reachable through the shipped binary today
+	// (server.WithSchemaResolver rejects a nil resolver, the JWT validator requires a non-empty allowed_schemas
+	// claim, and requestSchemas 401s on an empty list), but this package's core guarantee should not depend on a
+	// caller elsewhere doing the right thing.
+	if len(schemas) == 0 {
+		return nil, fmt.Errorf("%w: guarded execution requires at least one authorized schema", ErrAccessDenied)
+	}
+
 	guardCtx, cancel := context.WithTimeout(ctx, db.transaction.Timeout)
 	defer cancel()
 
@@ -144,7 +162,13 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 		// below) already finished the transaction: txGuard makes that a no-op instead of a second driver call.
 		stopWatchdog()
 		if !finished {
-			guard.rollback()
+			// M3: a failed Rollback leaves the physical connection still inside a DuckDB transaction even
+			// though txGuard now considers it finished (the driver clears its own bookkeeping before issuing
+			// ROLLBACK). Returning such a connection to the pool would make the next request's BeginTx fail,
+			// so discard it instead.
+			if _, rerr := guard.rollback(); rerr != nil {
+				reusable = false
+			}
 		}
 		if watchdogRolledBack.Load() {
 			reusable = false

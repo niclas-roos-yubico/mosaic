@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -71,4 +72,19 @@ func TestUsageAdvertisesHardenedFlags(t *testing.T) {
 		require.Contains(t, output, flag)
 	}
 	require.NotContains(t, output, "schema-match-headers")
+}
+
+func TestREADMEDocumentsPlatformSecurityContract(t *testing.T) {
+	payload, err := os.ReadFile("README.md")
+	require.NoError(t, err)
+	readme := string(payload)
+	for _, required := range []string{
+		"--platform-session-jwks-url", "--enable-external-access",
+		"--disable-result-cache", "--query-transaction-timeout",
+		"--max-query-result-bytes", "--quack-bootstrap-fd",
+		"preagg: { enabled: false }", "session expired",
+		"There is no `--catalog-invariant-refresh`",
+	} {
+		require.Contains(t, readme, required)
+	}
 }

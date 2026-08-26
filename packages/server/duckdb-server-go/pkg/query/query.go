@@ -353,6 +353,16 @@ func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statemen
 		}
 	}
 
+	// FORK: fix wave C1. The vendored driver's recordReader.Next() (duckdb-go/v2's arrow.go) returns false both on
+	// a clean end of results and when guardCtx is canceled or times out mid-drain -- setting Err() only in the
+	// latter case -- so without this check a mid-drain failure was indistinguishable from a normal finish: the
+	// loop would simply stop, "]" would close out a syntactically valid but truncated JSON array, and
+	// executeGuarded would go on to commit and return it to the caller as if it were complete. Mirrors the
+	// rdr.Err() check writeArrowOn already has below.
+	if rdr.Err() != nil {
+		return fmt.Errorf("query: error during record iteration: %w", rdr.Err())
+	}
+
 	_, err = w.Write([]byte("]"))
 	if err != nil {
 		return fmt.Errorf("query: failed to write end of JSON array: %w", err)
@@ -437,7 +447,13 @@ func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
 
 // FORK: new function, extracted from writeArrow's body (Task 7) so the guarded coordinator in transaction.go can
 // invoke it directly on the pooledArrowConn.arrow it already holds, without a second pool acquisition.
-func (db *DB) writeArrowOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) error {
+// FORK: fix wave I2. The return value is now named (retErr) because the deferred Close below can fail -- e.g.
+// writing the Arrow end-of-stream marker crosses the transaction's MaxResultBytes limit -- and with the previous
+// unnamed return, assigning to the loop's `err` variable inside the deferred closure was a dead store: it could
+// never change what the function actually returned. That let a truncated Arrow IPC stream commit and reach the
+// client as 200 instead of 413. Only overwrite retErr when it is still nil, so an earlier, already-reported error
+// from the write loop is never masked by a subsequent Close failure.
+func (db *DB) writeArrowOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) (retErr error) {
 	rdr, err := arrowConn.QueryContext(ctx, statement)
 	if err != nil {
 		return fmt.Errorf("query: failed to execute query: %w", err)
@@ -446,9 +462,12 @@ func (db *DB) writeArrowOn(ctx context.Context, arrowConn *duckdb.Arrow, stateme
 
 	arrowWriter := ipc.NewWriter(w, ipc.WithSchema(rdr.Schema()))
 	defer func() {
-		err = arrowWriter.Close()
-		if err != nil {
-			db.logger.Error("query: failed to close Arrow writer", "error", err)
+		if cerr := arrowWriter.Close(); cerr != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("query: failed to close Arrow writer: %w", cerr)
+			} else {
+				db.logger.Error("query: failed to close Arrow writer", "error", cerr)
+			}
 		}
 	}()
 

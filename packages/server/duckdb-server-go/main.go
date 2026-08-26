@@ -126,23 +126,9 @@ func run() int {
 	}
 	defer db.Close()
 
-	// FORK: external-access latch (Task 8/10), applied only in external-access-off mode. This is the
-	// first statement in run() to force sql.DB to open a physical connection (DisableExternalAccess
-	// issues SET through db.db), so the install-once initializer's INSTALL step above runs while
-	// external access is still enabled, and only then does this latch drop it -- globally and
-	// irreversibly, per external_access_global_test.go -- before any query-serving connection needs
-	// one. Quack mode (below) requires --enable-external-access=true and is mutually exclusive with
-	// this branch, so this branch is always skipped -- never entered -- when Quack is active.
-	if !*platform.enableExternalAccess {
-		if err := db.DisableExternalAccess(ctx); err != nil {
-			logger.Error("main: failed to latch external access", "error", err)
-			return 1
-		}
-		enabled, err := db.ExternalAccessEnabled(ctx)
-		if err != nil || enabled {
-			logger.Error("main: external access latch verification failed", "error", err)
-			return 1
-		}
+	// FORK[external-access-latch]: must fire after INSTALL and before any query-serving connection; ordering is the security property
+	if err := platform.latchExternalAccess(ctx, db, logger); err != nil {
+		return 1
 	}
 
 	// FORK: Quack bootstrap (Task 9/10). Starts before the public listener; the returned connection is

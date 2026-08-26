@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -100,4 +103,29 @@ func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionF
 		}))
 	}
 	return options
+}
+
+// latchExternalAccess drops DuckDB external access globally and irreversibly, then verifies it --
+// in external-access-off mode only. Its call position in run() is the security property: it must
+// fire after the install-once initializer's INSTALL (which needs external access) and before any
+// query-serving connection is opened. Quack mode requires --enable-external-access=true and is
+// mutually exclusive with this path, so this is always skipped -- never entered -- when Quack is
+// active. See pkg/query/external_access_global_test.go.
+func (p *platformConfig) latchExternalAccess(ctx context.Context, db *query.DB, logger *slog.Logger) error {
+	if *p.enableExternalAccess {
+		return nil
+	}
+	if err := db.DisableExternalAccess(ctx); err != nil {
+		logger.Error("main: failed to latch external access", "error", err)
+		return err
+	}
+	enabled, err := db.ExternalAccessEnabled(ctx)
+	if err != nil || enabled {
+		logger.Error("main: external access latch verification failed", "error", err)
+		if err == nil {
+			err = errors.New("main: external access still enabled after latch")
+		}
+		return err
+	}
+	return nil
 }

@@ -14,8 +14,7 @@ import (
 	"github.com/duckdb/duckdb-go/v2"
 
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/extensions"
-	// FORK: hardened platform-session JWT auth, wired into run() below (Task 2/4/10).
-	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/platformauth"
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/platformauth" // FORK[jwt-auth-import]: the two exec-denial option hooks and the middleware wrap all name it
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/server"
 )
@@ -138,28 +137,16 @@ func run() int {
 	}
 	defer closeQuack() // FORK[quack-bootstrap]: the bootstrap writer dies if this connection closes early
 
-	// FORK: platform session JWT validator (Task 2/10). Audience is hardcoded, never a flag.
-	validator, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{
-		JWKSURL: *platform.jwksURL, Issuer: *platform.jwtIssuer,
-		Audience: "platform-data-plane", Algorithms: []string{*platform.jwtAlgorithm},
-	})
+	// FORK[jwt-validator]: audience is hardcoded in platform.go, never operator-settable
+	validator, err := platform.newSessionValidator(logger)
 	if err != nil {
-		logger.Error("main: error creating platform session validator", "error", err)
 		return 1
 	}
 
-	// FORK: two of the three independent exec-denial gates are wired here: platformauth.Authorizer()
-	// (gate 1, denies CommandExec outright) and server.WithSchemaResolver (gate 2, which arms the
-	// schema-policy guard in pkg/server/server.go's execCommand). The third gate -- the query
-	// package's own policy in (*query.DB).Exec -- is active unconditionally in this binary because
-	// WithFunctionAllowlist and WithRemoteURILiteralRejection above are always applied, independent of
-	// --enable-external-access. server.WithSchemaMatchHeaders is called with upstream's value, which
-	// startup validation guarantees is empty; schemas always come from the validated JWT via
-	// WithSchemaResolver.
 	s, err := server.New(db,
 		server.WithSchemaMatchHeaders(schemaMatchHeaders...),
-		server.WithAuthorizer(platformauth.Authorizer()),
-		server.WithSchemaResolver(platformauth.SchemaResolver()),
+		server.WithAuthorizer(platformauth.Authorizer()),         // FORK[exec-denial-authorizer]: gate 1 of three; denies CommandExec outright
+		server.WithSchemaResolver(platformauth.SchemaResolver()), // FORK[exec-denial-schema-resolver]: gate 2 of three; arms the schema-policy guard in pkg/server's execCommand
 		server.WithLogger(logger),
 		server.WithCORS(server.CORSOptions{
 			AllowAllOrigins: true,
@@ -174,12 +161,7 @@ func run() int {
 	}
 	logger.Warn("DuckDB Server permits all HTTP and WebSocket origins for compatibility; enforce an outer origin or CSRF policy before exposing it to untrusted browsers")
 
-	// FORK: every request must carry a validated platform session JWT before it reaches s.
-	// platformauth.Middleware passes OPTIONS through untouched (see its doc comment), so it cannot
-	// disturb the CORS-preflight/method-switch composition already inside s: s's own CORS handler
-	// still intercepts OPTIONS and its method switch still returns 405 for anything but GET/POST
-	// before execCommand or authorize ever run.
-	handler := platformauth.Middleware(validator, logger)(s)
+	handler := platformauth.Middleware(validator, logger)(s) // FORK[session-middleware]: every request must carry a validated platform session JWT before it reaches s
 
 	// FORK: startup log carries only booleans and numeric limits for the hardened-mode flags -- never
 	// the Quack descriptor number, the bootstrap token/payload, or X-Platform-Session.
@@ -225,16 +207,15 @@ func run() int {
 	addr := *address + ":" + *port
 
 	// Check if both certificate files are provided for HTTPS
-	// FORK: the listener now serves handler (platformauth.Middleware wrapping s), not s directly.
 	if *certFile != "" && *keyFile != "" {
 		logger.Info(fmt.Sprintf("DuckDB Server listening on https://%s and wss://%s", addr, addr))
-		err = http.ListenAndServeTLS(addr, *certFile, *keyFile, handler)
+		err = http.ListenAndServeTLS(addr, *certFile, *keyFile, handler) // FORK[listener-serves-middleware]: upstream names s directly, so this cannot be additive
 	} else {
 		if *certFile != "" || *keyFile != "" {
 			logger.Warn("main: both cert and key files must be provided for HTTPS. Falling back to HTTP")
 		}
 		logger.Info(fmt.Sprintf("DuckDB Server listening on http://%s and ws://%s", addr, addr))
-		err = http.ListenAndServe(addr, handler)
+		err = http.ListenAndServe(addr, handler) // FORK[listener-serves-middleware]: upstream names s directly, so this cannot be additive
 	}
 	if err != nil {
 		logger.Error("main: error running HTTP server", "error", err)

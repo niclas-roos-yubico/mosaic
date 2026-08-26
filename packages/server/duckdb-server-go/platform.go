@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/platformauth"
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
@@ -128,4 +129,18 @@ func (p *platformConfig) latchExternalAccess(ctx context.Context, db *query.DB, 
 		return err
 	}
 	return nil
+}
+
+// newSessionValidator builds the platform session JWT validator. The audience is hardcoded to
+// "platform-data-plane" and is deliberately not a flag, so it can never be operator-settable.
+func (p *platformConfig) newSessionValidator(logger *slog.Logger) (*platformauth.JWTValidator, error) {
+	validator, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{
+		JWKSURL: *p.jwksURL, Issuer: *p.jwtIssuer,
+		Audience: "platform-data-plane", Algorithms: []string{*p.jwtAlgorithm},
+	})
+	if err != nil {
+		logger.Error("main: error creating platform session validator", "error", err)
+		return nil, err
+	}
+	return validator, nil
 }

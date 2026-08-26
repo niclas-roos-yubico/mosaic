@@ -1,0 +1,113 @@
+{
+  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; platform#z5x2 is expected to remove roughly 41 of these entries.",
+
+  "upstream_base": "32986b4e",
+  "upstream_base_ref": "v0.31.0",
+
+  "root_allowlist": [
+    ".github/workflows/test.yml"
+  ],
+
+  "fork_owned": [
+    "extension_init.go",
+    "extension_init_test.go",
+    "main_flags_test.go",
+    "quack_bootstrap.go",
+    "quack_bootstrap_test.go",
+    "pkg/platformauth/jwt.go",
+    "pkg/platformauth/jwt_test.go",
+    "pkg/platformauth/platformauth.go",
+    "pkg/platformauth/platformauth_test.go",
+    "pkg/platformauth/regression_test.go",
+    "pkg/query/arrow_pool.go",
+    "pkg/query/catalog_guard_test.go",
+    "pkg/query/driver_query.go",
+    "pkg/query/external_access.go",
+    "pkg/query/external_access_global_test.go",
+    "pkg/query/external_access_test.go",
+    "pkg/query/limited_buffer.go",
+    "pkg/query/limited_buffer_test.go",
+    "pkg/query/transaction.go",
+    "pkg/query/transaction_test.go",
+    "pkg/query/writer_test.go",
+    "pkg/server/schema_resolver.go",
+    "pkg/server/schema_resolver_test.go"
+  ],
+
+  "entries": [
+    { "slug": "jwt-auth-import",             "file": "main.go", "why": "platformauth import; unavoidable in the file that wires it" },
+    { "slug": "platform-flags",              "file": "main.go", "why": "12 hardened-mode flags; flag registration must happen in run()" },
+    { "slug": "startup-validation",          "file": "main.go", "why": "7 fail-fast flag-combination checks, must run before any resource is allocated" },
+    { "slug": "extension-initializer",       "file": "main.go", "why": "install-once initializer replaces an inline closure at connector construction" },
+    { "slug": "query-options-hardened",      "file": "main.go", "why": "allowlist and URI rejection made unconditional; option assembly is inline in run()" },
+    { "slug": "external-access-latch",       "file": "main.go", "why": "latch must fire after INSTALL and before the listener; ordering is the security property" },
+    { "slug": "quack-bootstrap",             "file": "main.go", "why": "bootstrap connection held for process lifetime via defer in run()" },
+    { "slug": "jwt-validator",               "file": "main.go", "why": "validator construction with hardcoded audience" },
+    { "slug": "exec-denial-wiring",          "file": "main.go", "why": "wires two of the three independent exec-denial gates" },
+    { "slug": "session-middleware",          "file": "main.go", "why": "wraps the server handler in JWT middleware" },
+    { "slug": "redacted-startup-log",        "file": "main.go", "why": "startup log must never carry the Quack fd, token or session header" },
+    { "slug": "listener-serves-middleware",  "file": "main.go", "why": "listener serves the wrapped handler, not the bare server" },
+
+    { "slug": "config-schema-resolver",      "file": "pkg/server/options.go", "why": "resolver field on upstream's private config struct" },
+
+    { "slug": "import-sync",                 "file": "pkg/server/server.go", "why": "sync.Once for single-source websocket close" },
+    { "slug": "import-time",                 "file": "pkg/server/server.go", "why": "websocket expiry enforcement" },
+    { "slug": "handler-schema-resolver-field",  "file": "pkg/server/server.go", "why": "resolver must be reachable from upstream's handler methods" },
+    { "slug": "handler-schema-resolver-assign", "file": "pkg/server/server.go", "why": "assignment in upstream's newHandler" },
+    { "slug": "request-schemas",             "file": "pkg/server/server.go", "why": "resolves JWT-derived schemas without coupling server to platformauth" },
+    { "slug": "ws-request-schemas",          "file": "pkg/server/server.go", "why": "websocket handler must use the resolver rather than headers" },
+    { "slug": "ws-expiry-close",             "file": "pkg/server/server.go", "why": "proactive close at expiry; deadline-context Read force-closes before a close frame can be written" },
+    { "slug": "ws-query-deadline",           "file": "pkg/server/server.go", "why": "query context must carry the validated exp so in-flight queries cannot outlive authorization" },
+    { "slug": "ws-close-once",               "file": "pkg/server/server.go", "why": "expiry and teardown must not race on which close status the peer sees" },
+    { "slug": "ws-message-query-ctx",        "file": "pkg/server/server.go", "why": "message handler needs both the network ctx and the expiry-bounded query ctx" },
+    { "slug": "http-request-schemas",        "file": "pkg/server/server.go", "why": "http handler must use the resolver rather than headers" },
+    { "slug": "exec-schema-policy-gate",     "file": "pkg/server/server.go", "why": "rule 4 exception: 4-line guard returning before upstream's exec path runs" },
+
+    { "slug": "guarded-error-mapping",       "file": "pkg/server/errors.go", "why": "byte-cap and deadline errors must not be classified as generic bad_request" },
+
+    { "slug": "validatesql-ast-delegate",    "file": "pkg/query/validator.go", "why": "ValidateSQL delegates to extracted validateParsedAST so the conn-pinned path can reuse it" },
+    { "slug": "validate-parsed-ast",         "file": "pkg/query/validator.go", "why": "AST-validation half extracted from ValidateSQL; duplicating it would drift from upstream silently" },
+    { "slug": "validate-sql-on",             "file": "pkg/query/validator.go", "why": "new function; parses on a specific driver.Conn so validation joins the open transaction" },
+    { "slug": "relation-collector",          "file": "pkg/query/validator.go", "why": "new Validator collecting BASE_TABLE refs for the live catalog check" },
+
+    { "slug": "arrow-pool-field",            "file": "pkg/query/query.go", "why": "arrowPool replaces upstream connPool+arrowSemaphore; NON-ADDITIVE, see deletions" },
+    { "slug": "guarded-state-fields",        "file": "pkg/query/query.go", "why": "transaction + resultCacheDisabled state on upstream's DB struct" },
+    { "slug": "guarded-option-validation",   "file": "pkg/query/query.go", "why": "rejects unsafe option combinations before any resource is allocated" },
+    { "slug": "result-cache-nil",            "file": "pkg/query/query.go", "why": "no otter cache constructed at all when the result cache is disabled" },
+    { "slug": "arrow-pool-construct",        "file": "pkg/query/query.go", "why": "arrowPool construction in upstream's New; NON-ADDITIVE" },
+    { "slug": "guarded-state-assign",        "file": "pkg/query/query.go", "why": "guarded state assignment in upstream's New" },
+    { "slug": "exec-guarded-gate",           "file": "pkg/query/query.go", "why": "third independent exec gate; guarded mode must never allow raw exec" },
+    { "slug": "validators-extract",          "file": "pkg/query/query.go", "why": "validator construction extracted from validateQuery; NON-ADDITIVE (14 lines). Duplicating instead would silently omit any validator upstream adds — a conflict is the correct failure mode for security code", "upstream": "candidate" },
+    { "slug": "validate-query-on",           "file": "pkg/query/query.go", "why": "new function; runs the validator set on a pinned conn and collects table refs" },
+    { "slug": "queryjson-guarded",           "file": "pkg/query/query.go", "why": "routes to the guarded coordinator when enabled" },
+    { "slug": "writejson-guarded",           "file": "pkg/query/query.go", "why": "routes to the guarded coordinator; commits before any byte is written" },
+    { "slug": "writejson-arrow-pool",        "file": "pkg/query/query.go", "why": "acquires from arrowPool instead of upstream's getArrowConn; NON-ADDITIVE" },
+    { "slug": "write-json-on",               "file": "pkg/query/query.go", "why": "encoder extracted from writeJSON so the coordinator can reuse a held connection" },
+    { "slug": "writejson-reader-err",        "file": "pkg/query/query.go", "why": "genuine upstream bug: a mid-drain reader failure was indistinguishable from a clean finish, committing a truncated JSON array as 200", "upstream": "candidate" },
+    { "slug": "queryarrow-guarded",          "file": "pkg/query/query.go", "why": "routes to the guarded coordinator when enabled" },
+    { "slug": "writearrow-guarded",          "file": "pkg/query/query.go", "why": "routes to the guarded coordinator; commits before any byte is written" },
+    { "slug": "writearrow-arrow-pool",       "file": "pkg/query/query.go", "why": "acquires from arrowPool instead of upstream's getArrowConn; NON-ADDITIVE" },
+    { "slug": "write-arrow-on",              "file": "pkg/query/query.go", "why": "encoder extracted from writeArrow so the coordinator can reuse a held connection" },
+    { "slug": "writearrow-close-err",        "file": "pkg/query/query.go", "why": "genuine upstream bug: deferred Close error was a dead store, letting a truncated Arrow stream commit as 200 instead of 413", "upstream": "candidate" },
+
+    { "slug": "opt-transaction-field",       "file": "pkg/query/options.go", "why": "Transaction option on upstream's Options struct" },
+    { "slug": "opt-disable-cache-field",     "file": "pkg/query/options.go", "why": "DisableResultCache option on upstream's Options struct" },
+    { "slug": "transaction-options-type",    "file": "pkg/query/options.go", "why": "TransactionOptions type declared in upstream's options file" },
+    { "slug": "with-transactional-guard",    "file": "pkg/query/options.go", "why": "constructor for the guarded-execution option" },
+    { "slug": "with-result-cache-disabled",  "file": "pkg/query/options.go", "why": "constructor for the cache-disable option" }
+  ],
+
+  "deletions": {
+    "_comment": "Upstream lines removed, per file, measured against upstream_base. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work.",
+    "pkg/query/query.go": 89,
+    "README.md": 51,
+    "main.go": 35,
+    "pkg/server/server.go": 18,
+    "pkg/query/validator.go": 12,
+    "pkg/server/options.go": 3,
+    "pkg/server/errors.go": 1,
+    "pkg/query/options.go": 1,
+    "pkg/query/remote_uri.go": 1,
+    "go.mod": 1
+  }
+}

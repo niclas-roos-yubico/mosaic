@@ -1,5 +1,5 @@
 {
-  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; platform#z5x2 is expected to remove roughly 41 of these entries.",
+  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down. platform#z5x2's main.go component has landed: every main.go site is now a bodyless hook and the file's deletions fell 35 -> 6 (the irreducible set: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s). The marked-site count rose 12 -> 13 deliberately -- exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver, because merging two security gates into one call site is how a fail-open gets built (AGENTS.md rule 4). Components 2 (pkg/query) and 3 (pkg/server) are still outstanding, in that order.",
 
   "upstream_base": "32986b4e",
   "upstream_base_ref": "v0.31.0",
@@ -12,6 +12,8 @@
     "extension_init.go",
     "extension_init_test.go",
     "main_flags_test.go",
+    "platform.go",
+    "platform_test.go",
     "quack_bootstrap.go",
     "quack_bootstrap_test.go",
     "pkg/platformauth/jwt.go",
@@ -35,18 +37,19 @@
   ],
 
   "entries": [
-    { "slug": "jwt-auth-import",             "file": "main.go", "why": "platformauth import; unavoidable in the file that wires it" },
-    { "slug": "platform-flags",              "file": "main.go", "why": "12 hardened-mode flags; flag registration must happen in run()" },
-    { "slug": "startup-validation",          "file": "main.go", "why": "7 fail-fast flag-combination checks, must run before any resource is allocated" },
-    { "slug": "extension-initializer",       "file": "main.go", "why": "install-once initializer replaces an inline closure at connector construction" },
-    { "slug": "query-options-hardened",      "file": "main.go", "why": "allowlist and URI rejection made unconditional; option assembly is inline in run()" },
-    { "slug": "external-access-latch",       "file": "main.go", "why": "latch must fire after INSTALL and before the listener; ordering is the security property" },
-    { "slug": "quack-bootstrap",             "file": "main.go", "why": "bootstrap connection held for process lifetime via defer in run()" },
-    { "slug": "jwt-validator",               "file": "main.go", "why": "validator construction with hardcoded audience" },
-    { "slug": "exec-denial-wiring",          "file": "main.go", "why": "wires two of the three independent exec-denial gates" },
-    { "slug": "session-middleware",          "file": "main.go", "why": "wraps the server handler in JWT middleware" },
-    { "slug": "redacted-startup-log",        "file": "main.go", "why": "startup log must never carry the Quack fd, token or session header" },
-    { "slug": "listener-serves-middleware",  "file": "main.go", "why": "listener serves the wrapped handler, not the bare server" },
+    { "slug": "jwt-auth-import",             "file": "main.go", "why": "platformauth import; the two exec-denial option hooks and the middleware wrap all name it" },
+    { "slug": "platform-flags",              "file": "main.go", "why": "hardened-mode flags must be declared on the default FlagSet before upstream's flag.Parse" },
+    { "slug": "startup-validation",          "file": "main.go", "why": "fail-fast flag-combination checks must run after flag.Parse and before any resource is allocated" },
+    { "slug": "extension-initializer",       "file": "main.go", "why": "install-once state is created once, not per connection; only the closure body changes, upstream's NewConnector call and brace are byte-identical" },
+    { "slug": "query-options-hardened",      "file": "main.go", "why": "the data plane's query options are unconditional, so they append after upstream's assembly rather than replacing it" },
+    { "slug": "external-access-latch",       "file": "main.go", "why": "latch must fire after INSTALL and before any query-serving connection; ordering is the security property" },
+    { "slug": "quack-bootstrap",             "file": "main.go", "why": "bootstrap must start before the public listener and its connection is held for the process lifetime via defer in run()" },
+    { "slug": "jwt-validator",               "file": "main.go", "why": "validator construction; audience is hardcoded in platform.go, never operator-settable" },
+    { "slug": "exec-denial-authorizer",      "file": "main.go", "why": "gate 1 of three independent exec denials; deliberately kept separate from the resolver hook (AGENTS.md rule 4 -- merging them produced a fail-open in a dry run)" },
+    { "slug": "exec-denial-schema-resolver", "file": "main.go", "why": "gate 2 of three; arms the schema-policy guard in pkg/server's execCommand" },
+    { "slug": "session-middleware",          "file": "main.go", "why": "wraps the server handler in JWT middleware; every request must carry a validated session before it reaches s" },
+    { "slug": "redacted-startup-log",        "file": "main.go", "why": "hardened-mode fields are added beside upstream's literal so its 14 rows stay byte-identical; the log must never carry the Quack fd, token or session header" },
+    { "slug": "listener-serves-middleware",  "file": "main.go", "why": "listener serves the wrapped handler; upstream names s directly so this cannot be additive" },
 
     { "slug": "config-schema-resolver",      "file": "pkg/server/options.go", "why": "resolver field on upstream's private config struct" },
 
@@ -100,8 +103,8 @@
   "deletions": {
     "_comment": "Upstream lines removed, per file, measured against upstream_base. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work.",
     "pkg/query/query.go": 89,
-    "README.md": 51,
-    "main.go": 35,
+    "README.md": 49,
+    "main.go": 6,
     "pkg/server/server.go": 18,
     "pkg/query/validator.go": 12,
     "pkg/server/options.go": 3,

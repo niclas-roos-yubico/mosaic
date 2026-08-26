@@ -131,6 +131,19 @@ func (p *platformConfig) latchExternalAccess(ctx context.Context, db *query.DB, 
 	return nil
 }
 
+// addLogFields adds the hardened-mode fields to upstream's startup config map: booleans and numeric
+// limits only, never the Quack descriptor number, the bootstrap token or payload, or
+// X-Platform-Session. It exists so upstream's map literal stays byte-identical -- inlining these
+// keys pushed gofmt's alignment column out past upstream's longest 20-character key and rewrote all
+// 14 of its rows, which cost 14 deletions on the fork's highest-churn file.
+func (p *platformConfig) addLogFields(config map[string]interface{}) {
+	config["external_access_enabled"] = *p.enableExternalAccess
+	config["result_cache_disabled"] = *p.disableResultCache
+	config["query_transaction_timeout"] = p.transactionTimeout.String()
+	config["max_query_result_bytes"] = *p.maxQueryResultBytes
+	config["quack_bootstrap_configured"] = *p.quackBootstrapFD >= 3
+}
+
 // newSessionValidator builds the platform session JWT validator. The audience is hardcoded to
 // "platform-data-plane" and is deliberately not a flag, so it can never be operator-settable.
 func (p *platformConfig) newSessionValidator(logger *slog.Logger) (*platformauth.JWTValidator, error) {

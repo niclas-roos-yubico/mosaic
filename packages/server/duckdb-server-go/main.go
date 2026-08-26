@@ -163,29 +163,23 @@ func run() int {
 
 	handler := platformauth.Middleware(validator, logger)(s) // FORK[session-middleware]: every request must carry a validated platform session JWT before it reaches s
 
-	// FORK: startup log carries only booleans and numeric limits for the hardened-mode flags -- never
-	// the Quack descriptor number, the bootstrap token/payload, or X-Platform-Session.
 	config := map[string]interface{}{
-		"database":                      *dbPath,
-		"address":                       *address,
-		"port":                          *port,
-		"connection_pool_size":          *poolSize,
-		"cache_size":                    *maxCacheEntries,
-		"cert_file":                     *certFile,
-		"key_file":                      *keyFile,
-		"schema_match_headers":          *schemaMatchHeadersStr,
-		"ttl":                           ttl,
-		"max_cache_bytes":               *maxCacheBytes,
-		"load_extensions":               *extensionsStr,
-		"function_blocklist":            *functionBlocklistStr,
-		"function_allowlist":            functionAllowlist.String(),
-		"function_allowlist_configured": functionAllowlist.set,
-		"external_access_enabled":       *platform.enableExternalAccess,
-		"result_cache_disabled":         *platform.disableResultCache,
-		"query_transaction_timeout":     platform.transactionTimeout.String(),
-		"max_query_result_bytes":        *platform.maxQueryResultBytes,
-		"quack_bootstrap_configured":    *platform.quackBootstrapFD >= 3,
+		"database":             *dbPath,
+		"address":              *address,
+		"port":                 *port,
+		"connection_pool_size": *poolSize,
+		"cache_size":           *maxCacheEntries,
+		"cert_file":            *certFile,
+		"key_file":             *keyFile,
+		"schema_match_headers": *schemaMatchHeadersStr,
+		"ttl":                  ttl,
+		"max_cache_bytes":      *maxCacheBytes,
+		"load_extensions":      *extensionsStr,
+		"function_blocklist":   *functionBlocklistStr,
+		"function_allowlist":   functionAllowlist.String(),
+		"allowlist_configured": functionAllowlist.set,
 	}
+	platform.addLogFields(config) // FORK[redacted-startup-log]: fork keys are added beside upstream's literal so its 14 rows stay byte-identical
 	logger.Info("DuckDB Server configuration", "config", config)
 
 	extensions, err := db.GetExtensions(ctx)

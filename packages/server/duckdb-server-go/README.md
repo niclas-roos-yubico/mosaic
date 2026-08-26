@@ -31,8 +31,11 @@ You can customize the server behavior with the following command-line flags:
 -   `--cache-ttl <duration>`: Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s. Not a freshness or authorization control once `--disable-result-cache=true` — see **Platform Security Mode**.
 -   `--cert <path>`: Path to a TLS certificate file to enable HTTPS.
 -   `--key <path>`: Path to a TLS private key file to enable HTTPS.
+-   `--schema-match-headers`: Comma-separated list of headers to match against schema names for multi-tenant access control (e.g., `X-Tenant-Id,verified-user-id`).
+    In this build, any non-empty value is rejected at startup — schemas come from the validated session JWT. See **Platform Security Mode**.
 -   `--load-extensions`: Comma-separated list of extensions to install and load at startup. Use a pipe after the extension name to specify a DuckDB repository alias. Unspecified repositories use DuckDB's default (e.g. `mysql_scanner,netquack|community,aws|core_nightly`).
--   `--function-blocklist`: Comma-separated list of exact function names to block (e.g. `bigquery_query,read_parquet`). In this build, any non-empty value is rejected at startup — see **Platform Security Mode**.
+-   `--function-blocklist`: Comma-separated list of exact function names to block, useful for blocking functions that may pose security or performance risks (e.g. `bigquery_query,read_parquet`).
+    In this build, any non-empty value is rejected at startup — see **Platform Security Mode**.
 -   `--function-allowlist`: Comma-separated list of exact function names to add to the reviewed defaults. Names are matched case-insensitively, repeated flags accumulate names, and an explicitly empty value enables only the defaults. This build always applies the reviewed defaults regardless of this flag — see **Platform Security Mode**.
 
 By default, the server will look for `localhost.pem` and `localhost-key.pem` in the current directory to enable HTTPS if the `--cert` and `--key` flags are not provided.
@@ -78,8 +81,9 @@ greppable in whatever supervises the process:
 5. `--query-transaction-timeout must be positive`
 6. `--max-query-result-bytes must be positive`
 7. `function blocklist is not permitted; use the reviewed allowlist`
+8. `--schema-match-headers is not permitted; schemas are derived from the validated session JWT`
 
-If the process exits `1` with none of these seven messages, none of these conditions were violated — look at
+If the process exits `1` with none of these eight messages, none of these conditions were violated — look at
 the next startup failure instead (invalid `--load-extensions`, a rejected JWT algorithm, a connector error),
 which is logged rather than printed to stderr.
 
@@ -226,6 +230,7 @@ options object as the second.
 | **Every** guarded query suddenly 403s, including ones touching no macro | Someone ran `CREATE MACRO` anywhere in the catalog — the check is catalog-wide | Find and `DROP` the macro; queries recover immediately, no restart needed |
 | A query 403s "not in the allowlist" | The function isn't in the reviewed defaults | Add it via `--function-allowlist=name`; if it accepts a path/URI, you're now also relying on remote-URI rejection (see above) |
 | Startup refuses `--function-blocklist=...` | Blocklists aren't supported by this binary | Use `--function-allowlist` instead |
+| Startup refuses `--schema-match-headers=...` | Header-derived schemas aren't supported by this binary | Nothing to do — schemas come from the session JWT's `allowed_schemas` |
 | Every guarded query times out (504) near-instantly | `--query-transaction-timeout` set below ~20ms | The live catalog check alone costs ~10-19ms; raise the timeout |
 | 413 `response_too_large` | Result exceeds `--max-query-result-bytes` | Narrow the query, or raise the flag with the pool-size × cap memory budget in mind |
 | `--platform-jwt-alg=HS256` (or similar) refuses to start | HMAC and `none` algorithms are always rejected | Use `RS256` (or another asymmetric algorithm the JWKS actually publishes) |

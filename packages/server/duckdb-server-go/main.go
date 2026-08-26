@@ -34,6 +34,7 @@ func run() int {
 	ttlStr := flag.String("cache-ttl", "0s", "Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s.")
 	certFile := flag.String("cert", "", "Path to TLS certificate file (optional, enables HTTPS)")
 	keyFile := flag.String("key", "", "Path to TLS private key file (optional, enables HTTPS)")
+	schemaMatchHeadersStr := flag.String("schema-match-headers", "", "Comma-separated list of headers to match against schema names for multi-tenant access control (e.g., \"X-Tenant-Id,verified-user-id\")")
 	extensionsStr := flag.String("load-extensions", "", "Comma-separated list of extensions to install and load at startup. Use a pipe after the extension name to specify a DuckDB repository alias. Unspecified repositories use DuckDB's default (e.g. mysql_scanner,netquack|community,aws|core_nightly).")
 	functionBlocklistStr := flag.String("function-blocklist", "", "Comma-separated list of functions to block, useful for blocking functions that may pose security or performance risks. (e.g., 'bigquery_query,read_parquet')")
 	var functionAllowlist optionalCommaListFlag
@@ -42,8 +43,8 @@ func run() int {
 	// FORK: hardened platform-security-mode flags (Task 10). platform-session-jwks-url has no safe
 	// default -- run() rejects startup immediately below if it is empty. The audience is deliberately
 	// not a flag: JWTValidatorConfig.Audience is hardcoded below to "platform-data-plane" so it can
-	// never be operator-settable. --schema-match-headers is removed: hardened mode always resolves
-	// schemas from the validated session JWT (see server.WithSchemaResolver below).
+	// never be operator-settable. --schema-match-headers and --function-blocklist keep upstream's
+	// declarations and call sites; a non-empty value is rejected at startup instead (kata platform#z5x2).
 	platformJWKSURL := flag.String("platform-session-jwks-url", "", "Platform session JWKS URL; required")
 	platformJWTIssuer := flag.String("platform-jwt-iss", "https://<umbrella-host>/platform", "Expected Platform session JWT issuer")
 	platformJWTAlgorithm := flag.String("platform-jwt-alg", "RS256", "Allowed Platform session JWT signing algorithm")
@@ -86,6 +87,20 @@ func run() int {
 	if strings.TrimSpace(*functionBlocklistStr) != "" {
 		fmt.Fprintln(os.Stderr, "main: function blocklist is not permitted; use the reviewed allowlist")
 		return 1
+	}
+	if strings.TrimSpace(*schemaMatchHeadersStr) != "" {
+		fmt.Fprintln(os.Stderr, "main: --schema-match-headers is not permitted; schemas are derived from the validated session JWT")
+		return 1
+	}
+
+	var schemaMatchHeaders []string
+	if *schemaMatchHeadersStr != "" {
+		schemaMatchHeaders = strings.Split(*schemaMatchHeadersStr, ",")
+	}
+
+	var functionBlocklist []string
+	if *functionBlocklistStr != "" {
+		functionBlocklist = strings.Split(*functionBlocklistStr, ",")
 	}
 
 	ctx := context.Background()
@@ -137,8 +152,8 @@ func run() int {
 	// FORK: the reviewed function allowlist and remote-URI-literal rejection are now unconditional
 	// (Task 10), not opt-in: query.WithFunctionAllowlist always runs, and functionAllowlist.values is
 	// nil when --function-allowlist is omitted, so functionset.DefaultFunctions still applies via
-	// query.resolveFunctionAllowlist. The function-blocklist option is gone entirely -- a non-empty
-	// --function-blocklist is already a startup error above, before this point is ever reached.
+	// query.resolveFunctionAllowlist. query.WithFunctionBlocklist keeps upstream's call site; startup
+	// validation guarantees the slice is empty.
 	queryOptions := []query.OptionFunc{
 		query.WithMaxConnections(*poolSize),
 		query.WithMaxCacheEntries(*maxCacheEntries),
@@ -147,6 +162,7 @@ func run() int {
 		query.WithLogger(logger),
 		query.WithFunctionAllowlist(query.FunctionAllowlistOptions{Include: functionAllowlist.values}),
 		query.WithRemoteURILiteralRejection(),
+		query.WithFunctionBlocklist(functionBlocklist),
 	}
 	if *disableResultCache {
 		queryOptions = append(queryOptions, query.WithResultCacheDisabled())
@@ -220,9 +236,11 @@ func run() int {
 	// schema-policy guard in pkg/server/server.go's execCommand). The third gate -- the query
 	// package's own policy in (*query.DB).Exec -- is active unconditionally in this binary because
 	// WithFunctionAllowlist and WithRemoteURILiteralRejection above are always applied, independent of
-	// --enable-external-access. server.WithSchemaMatchHeaders is intentionally not called: hardened
-	// mode has no --schema-match-headers flag and always derives schemas from the validated JWT.
+	// --enable-external-access. server.WithSchemaMatchHeaders is called with upstream's value, which
+	// startup validation guarantees is empty; schemas always come from the validated JWT via
+	// WithSchemaResolver.
 	s, err := server.New(db,
+		server.WithSchemaMatchHeaders(schemaMatchHeaders...),
 		server.WithAuthorizer(platformauth.Authorizer()),
 		server.WithSchemaResolver(platformauth.SchemaResolver()),
 		server.WithLogger(logger),
@@ -256,9 +274,11 @@ func run() int {
 		"cache_size":                    *maxCacheEntries,
 		"cert_file":                     *certFile,
 		"key_file":                      *keyFile,
+		"schema_match_headers":          *schemaMatchHeadersStr,
 		"ttl":                           ttl,
 		"max_cache_bytes":               *maxCacheBytes,
 		"load_extensions":               *extensionsStr,
+		"function_blocklist":            *functionBlocklistStr,
 		"function_allowlist":            functionAllowlist.String(),
 		"function_allowlist_configured": functionAllowlist.set,
 		"external_access_enabled":       *enableExternalAccess,

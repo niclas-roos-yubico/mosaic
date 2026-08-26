@@ -40,56 +40,11 @@ func run() int {
 	var functionAllowlist optionalCommaListFlag
 	flag.Var(&functionAllowlist, "function-allowlist", "Comma-separated exact names to add to the reviewed default allowlist. An empty value enables only the defaults; names are matched case-insensitively.")
 
-	// FORK: hardened platform-security-mode flags (Task 10). platform-session-jwks-url has no safe
-	// default -- run() rejects startup immediately below if it is empty. The audience is deliberately
-	// not a flag: JWTValidatorConfig.Audience is hardcoded below to "platform-data-plane" so it can
-	// never be operator-settable. --schema-match-headers and --function-blocklist keep upstream's
-	// declarations and call sites; a non-empty value is rejected at startup instead (kata platform#z5x2).
-	platformJWKSURL := flag.String("platform-session-jwks-url", "", "Platform session JWKS URL; required")
-	platformJWTIssuer := flag.String("platform-jwt-iss", "https://<umbrella-host>/platform", "Expected Platform session JWT issuer")
-	platformJWTAlgorithm := flag.String("platform-jwt-alg", "RS256", "Allowed Platform session JWT signing algorithm")
-	enableExternalAccess := flag.Bool("enable-external-access", false, "Keep DuckDB external access enabled; activates the transactional catalog guard")
-	disableResultCache := flag.Bool("disable-result-cache", false, "Disable the server-side persisted SQL result cache")
-	queryTransactionTimeout := flag.Duration("query-transaction-timeout", 30*time.Second, "Maximum guarded query duration including pool wait and materialization")
-	maxQueryResultBytes := flag.Int64("max-query-result-bytes", 64<<20, "Maximum encoded JSON or Arrow response bytes")
-	quackBootstrapFD := flag.Int("quack-bootstrap-fd", -1, "Inherited descriptor carrying versioned Quack bootstrap config; -1 disables")
+	platform := registerPlatformFlags() // FORK[platform-flags]: hardened-mode flags must be declared on the default FlagSet before upstream's flag.Parse
 	flag.Parse()
 
-	// FORK: startup-mode validation (Task 10). Every check below runs immediately after flag.Parse,
-	// before any resource is allocated -- no listener, connector, or JWKS fetch -- so an unsafe flag
-	// combination fails fast with a specific, greppable message instead of partially starting up. The
-	// order matters: several checks below only make sense once an earlier one has already passed, and
-	// tests assert on which message comes back for a given partial flag set.
-	if *platformJWKSURL == "" {
-		fmt.Fprintln(os.Stderr, "main: --platform-session-jwks-url is required")
-		return 1
-	}
-	if *quackBootstrapFD != -1 && *quackBootstrapFD < 3 {
-		fmt.Fprintln(os.Stderr, "main: --quack-bootstrap-fd must be -1 or at least 3")
-		return 1
-	}
-	if *quackBootstrapFD >= 3 && !*enableExternalAccess {
-		fmt.Fprintln(os.Stderr, "main: --quack-bootstrap-fd requires --enable-external-access=true")
-		return 1
-	}
-	if *enableExternalAccess && !*disableResultCache {
-		fmt.Fprintln(os.Stderr, "main: --enable-external-access=true requires --disable-result-cache=true")
-		return 1
-	}
-	if *queryTransactionTimeout <= 0 {
-		fmt.Fprintln(os.Stderr, "main: --query-transaction-timeout must be positive")
-		return 1
-	}
-	if *maxQueryResultBytes <= 0 {
-		fmt.Fprintln(os.Stderr, "main: --max-query-result-bytes must be positive")
-		return 1
-	}
-	if strings.TrimSpace(*functionBlocklistStr) != "" {
-		fmt.Fprintln(os.Stderr, "main: function blocklist is not permitted; use the reviewed allowlist")
-		return 1
-	}
-	if strings.TrimSpace(*schemaMatchHeadersStr) != "" {
-		fmt.Fprintln(os.Stderr, "main: --schema-match-headers is not permitted; schemas are derived from the validated session JWT")
+	// FORK[startup-validation]: must run after flag.Parse and before any resource is allocated
+	if err := platform.validate(*schemaMatchHeadersStr, *functionBlocklistStr); err != nil {
 		return 1
 	}
 
@@ -164,12 +119,12 @@ func run() int {
 		query.WithRemoteURILiteralRejection(),
 		query.WithFunctionBlocklist(functionBlocklist),
 	}
-	if *disableResultCache {
+	if *platform.disableResultCache {
 		queryOptions = append(queryOptions, query.WithResultCacheDisabled())
 	}
-	if *enableExternalAccess {
+	if *platform.enableExternalAccess {
 		queryOptions = append(queryOptions, query.WithTransactionalCatalogGuard(query.TransactionOptions{
-			Timeout: *queryTransactionTimeout, MaxResultBytes: *maxQueryResultBytes,
+			Timeout: *platform.transactionTimeout, MaxResultBytes: *platform.maxQueryResultBytes,
 		}))
 	}
 
@@ -187,7 +142,7 @@ func run() int {
 	// irreversibly, per external_access_global_test.go -- before any query-serving connection needs
 	// one. Quack mode (below) requires --enable-external-access=true and is mutually exclusive with
 	// this branch, so this branch is always skipped -- never entered -- when Quack is active.
-	if !*enableExternalAccess {
+	if !*platform.enableExternalAccess {
 		if err := db.DisableExternalAccess(ctx); err != nil {
 			logger.Error("main: failed to latch external access", "error", err)
 			return 1
@@ -203,8 +158,8 @@ func run() int {
 	// held via defer for the lifetime of the process so the writer stays alive. No error path below
 	// logs the descriptor number, token, config, or payload.
 	var quackConn driver.Conn
-	if *quackBootstrapFD >= 3 {
-		cfg, err := readQuackBootstrapFD(*quackBootstrapFD)
+	if *platform.quackBootstrapFD >= 3 {
+		cfg, err := readQuackBootstrapFD(*platform.quackBootstrapFD)
 		if err != nil {
 			logger.Error("main: failed to read Quack bootstrap", "error", err)
 			return 1
@@ -223,8 +178,8 @@ func run() int {
 
 	// FORK: platform session JWT validator (Task 2/10). Audience is hardcoded, never a flag.
 	validator, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{
-		JWKSURL: *platformJWKSURL, Issuer: *platformJWTIssuer,
-		Audience: "platform-data-plane", Algorithms: []string{*platformJWTAlgorithm},
+		JWKSURL: *platform.jwksURL, Issuer: *platform.jwtIssuer,
+		Audience: "platform-data-plane", Algorithms: []string{*platform.jwtAlgorithm},
 	})
 	if err != nil {
 		logger.Error("main: error creating platform session validator", "error", err)
@@ -281,11 +236,11 @@ func run() int {
 		"function_blocklist":            *functionBlocklistStr,
 		"function_allowlist":            functionAllowlist.String(),
 		"function_allowlist_configured": functionAllowlist.set,
-		"external_access_enabled":       *enableExternalAccess,
-		"result_cache_disabled":         *disableResultCache,
-		"query_transaction_timeout":     queryTransactionTimeout.String(),
-		"max_query_result_bytes":        *maxQueryResultBytes,
-		"quack_bootstrap_configured":    *quackBootstrapFD >= 3,
+		"external_access_enabled":       *platform.enableExternalAccess,
+		"result_cache_disabled":         *platform.disableResultCache,
+		"query_transaction_timeout":     platform.transactionTimeout.String(),
+		"max_query_result_bytes":        *platform.maxQueryResultBytes,
+		"quack_bootstrap_configured":    *platform.quackBootstrapFD >= 3,
 	}
 	logger.Info("DuckDB Server configuration", "config", config)
 

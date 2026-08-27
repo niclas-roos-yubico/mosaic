@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
@@ -12,11 +11,7 @@ import (
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
-func boolPtr(v bool) *bool                       { return &v }
-func int64Ptr(v int64) *int64                    { return &v }
-func intPtr(v int) *int                          { return &v }
-func strPtr(v string) *string                    { return &v }
-func durationPtr(v time.Duration) *time.Duration { return &v }
+func boolPtr(v bool) *bool { return &v }
 
 // platformDB builds a real DuckDB behind the platform's own query options, so these tests exercise
 // the allowlist the deployed binary produces rather than a re-derived name set. Behaviour, not

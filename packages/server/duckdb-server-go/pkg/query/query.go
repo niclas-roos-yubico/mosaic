@@ -39,10 +39,8 @@ type DB struct {
 	rejectRemoteURILiterals     bool
 	logger                      *slog.Logger
 
-	// FORK[arrow-pool-field]: pairs each Arrow object with the driver.Conn it was built from, which upstream's
-	// connPool cannot; only the guarded coordinator uses it. Own alignment group so upstream's rows are untouched.
-	arrowPool   *arrowPool
-	transaction *TransactionOptions
+	arrowPool   *arrowPool          // FORK[arrow-pool-field]: pairs each Arrow object with the driver.Conn it was built from, which upstream's connPool cannot; only the guarded coordinator uses it
+	transaction *TransactionOptions // FORK[guarded-state-field]: guard state lives on upstream's own receiver, not a wrapper type, so every dispatch path -- including New's own return value -- reaches it; see AGENTS.md rule 4
 }
 
 // New creates a new DB instance using the provided DuckDB connector, opening a sql.DB and arrow connection.
@@ -119,7 +117,7 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 		logger:                      o.Logger,
 
 		arrowPool:   newArrowPool(connector, o.MaxConnections, o.Logger), // FORK[arrow-pool-field]
-		transaction: o.Transaction,                                       // FORK[arrow-pool-field]
+		transaction: o.Transaction,                                       // FORK[guarded-state-field]
 	}, nil
 }
 

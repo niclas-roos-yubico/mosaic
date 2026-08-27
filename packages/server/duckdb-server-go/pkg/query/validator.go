@@ -104,20 +104,27 @@ func validateParsedAST(m map[string]any, validators ...Validator) error {
 	}
 
 	// Extract all schema references, including tables without an explicit schema reference, from the AST
-	for _, statement := range statements {
-		mapped, ok := statement.(map[string]any)
+	for _, stmt := range statements {
+		stmtMap, ok := stmt.(map[string]any)
 		if !ok {
-			return fmt.Errorf("invalid statement format: %v", statement)
+			return fmt.Errorf("invalid statement format: %v", stmt)
 		}
 
-		walkAST(mapped, make([]string, 0, 10), validators)
+		keyStack := make([]string, 0, 10)
+
+		walkAST(stmtMap, keyStack, validators)
 	}
 
-	var combined []error
+	var combinedErrs []error
+
 	for _, validator := range validators {
-		combined = append(combined, validator.Validate()...)
+		validationErrs := validator.Validate()
+		if len(validationErrs) > 0 {
+			combinedErrs = append(combinedErrs, validationErrs...)
+		}
 	}
-	return errors.Join(combined...)
+
+	return errors.Join(combinedErrs...)
 }
 
 // FORK: new function. validateSQLOn parses and validates SQL on a specific driver.Conn (bypassing db.db), so that

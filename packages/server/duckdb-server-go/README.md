@@ -28,7 +28,8 @@ You can customize the server behavior with the following command-line flags:
 -   `--connection-pool-size <size>`: The maximum size of the connection pool. Defaults to 10.
 -   `--max-cache-entries <size>`: The maximum number of cache entries. Defaults to 1000.
 -   `--max-cache-bytes <bytes>`: Max number of cache size in bytes (overrides max-cache-entries if both are set). Defaults to 0 (no limit).
--   `--cache-ttl <duration>`: Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s. Not a freshness or authorization control once `--disable-result-cache=true` — see **Platform Security Mode**.
+-   `--cache-ttl <duration>`: Time-to-live for cache entries as a Go duration. 0s means no expiration (e.g., '10m', '1h'). Defaults to 0s.
+    In this build it is not a freshness or authorization control once `--disable-result-cache=true` — see **Platform Security Mode**.
 -   `--cert <path>`: Path to a TLS certificate file to enable HTTPS.
 -   `--key <path>`: Path to a TLS private key file to enable HTTPS.
 -   `--schema-match-headers`: Comma-separated list of headers to match against schema names for multi-tenant access control (e.g., `X-Tenant-Id,verified-user-id`).
@@ -36,7 +37,8 @@ You can customize the server behavior with the following command-line flags:
 -   `--load-extensions`: Comma-separated list of extensions to install and load at startup. Use a pipe after the extension name to specify a DuckDB repository alias. Unspecified repositories use DuckDB's default (e.g. `mysql_scanner,netquack|community,aws|core_nightly`).
 -   `--function-blocklist`: Comma-separated list of exact function names to block, useful for blocking functions that may pose security or performance risks (e.g. `bigquery_query,read_parquet`).
     In this build, any non-empty value is rejected at startup — see **Platform Security Mode**.
--   `--function-allowlist`: Comma-separated list of exact function names to add to the reviewed defaults. Names are matched case-insensitively, repeated flags accumulate names, and an explicitly empty value enables only the defaults. This build always applies the reviewed defaults regardless of this flag — see **Platform Security Mode**.
+-   `--function-allowlist`: Comma-separated list of exact function names to add to the reviewed defaults. Names are matched case-insensitively, repeated flags accumulate names, and an explicitly empty value enables only the defaults.
+    This build always applies the reviewed defaults regardless of this flag — see **Platform Security Mode**.
 
 By default, the server will look for `localhost.pem` and `localhost-key.pem` in the current directory to enable HTTPS if the `--cert` and `--key` flags are not provided.
 
@@ -275,11 +277,13 @@ the defaults without adding application-specific names:
 duckdb-server-go --function-allowlist=
 ```
 
-Without `--function-allowlist`, a server built directly on `pkg/query` remains unrestricted. This fork's
-`duckdb-server-go` binary is the exception: it always calls `WithFunctionAllowlist`, so the reviewed defaults
-are active even when `--function-allowlist` is never passed — see **Platform Security Mode** above. The flag
-intentionally exposes only policy activation and exact additions; use a custom binary embedding `pkg/query`
-for exclusions, exact-only policies, or extension groups.
+Without `--function-allowlist`, the server remains unrestricted. The binary intentionally exposes only policy
+activation and exact additions; use a custom binary embedding `pkg/query` for exclusions, exact-only policies, or
+extension groups.
+
+That first sentence does not apply to this build: the `duckdb-server-go` binary always calls
+`WithFunctionAllowlist`, so the reviewed defaults are active even when `--function-allowlist` is never passed —
+see **Platform Security Mode** above. Only a server built directly on `pkg/query` is unrestricted by default.
 
 Programs embedding `pkg/query` can apply the same policy and add application functions with:
 
@@ -402,6 +406,54 @@ allowlist — see **Platform Security Mode** above for how the two combine in pr
 why remote-URI rejection is currently structural defense in depth rather than the only thing denying remote
 reads under an all-defaults configuration.
 
+> **Fork note.** The section below is upstream's, restored verbatim for reference. It does not describe this
+> build: `--schema-match-headers` is rejected at startup here, and schemas are derived from the validated
+> session JWT instead — see **Platform Security Mode** above. Read it as documentation of the upstream
+> mechanism this fork replaces, not as configuration advice for this binary.
+
+### Multi-Tenant Access Control
+
+`schema-match-headers` isn't part of the mosaic server API, but is provided here as an example of how to have
+multiple users / customers share the same DuckDB server instance while restricting table queries to tenant schemas.
+
+1. **Client side**: Give each tenant a dedicated pre-aggregation schema when constructing and registering its coordinator
+   ([docs](https://idl.uw.edu/mosaic/api/core/coordinator.html#constructor)):
+
+   ```js
+   const mc = new Coordinator(connector, {
+     preagg: { enabled: false, schema: tenantSchema }
+   });
+   coordinator(mc);
+   ```
+
+   The schema name is part of the tenant authorization policy and must not be shared by mutually untrusted tenants. It
+   must be one of the schema names supplied by the trusted headers described below. If results should be shared across
+   users, use a tenant id or organization id rather than a user id.
+2. **Authentication**: This implementation assumes that there is some authentication mechanism in place that sets the
+   trusted authentication headers in the request. The server will use these headers to determine which schema
+   to use for the query. This might be a server-side cookie sent through with mosaic requests, or a header set on outbound
+   requests from the client, which are verified in an api gateway or server middleware before reaching the DuckDB server.
+3. **Server side**: Start the server with `--schema-match-headers=X-Tenant-Id,verified-user-id`, or whatever headers
+   you trust to match against schema names. Inbound requests will be checked for these headers, and if they are present,
+   the server will allow access to any schemas that match the header values. If no headers are present, and `--schema-match-headers`
+   is set, the server will return a 401 Unauthorized error.
+
+_Note:_ Schema matching authorizes schema references in submitted SQL; it does not isolate the shared DuckDB process,
+filesystem, network, extensions, or credentials. It assumes a single catalog; attached catalogs are outside this policy
+boundary, and explicitly catalog-qualified table, `SHOW`, and function references are rejected. Function allowlists and
+blocklists apply only to explicit function calls. Schema matching does not restrict catalog metadata returned by functions
+such as `duckdb_tables()` and `pragma_table_info()`. If metadata is sensitive, allow or block the exact metadata-function
+names exposed by the deployment; wildcard patterns such as `duckdb_*` are not supported, and the policy must be reviewed
+when DuckDB or its extensions change. To restrict file-reading functions, also enable schema matching so DuckDB replacement
+scans such as `FROM 'data.parquet'` are rejected as unqualified table references. These controls are not a sandbox: run the
+server with access only to external resources that are safe for every tenant.
+
+If `--schema-match-headers`, `--function-blocklist`, or `--function-allowlist` is configured, `json` and `arrow` requests
+are limited to statements DuckDB can serialize for validation; unsupported forms such as `PRAGMA` and `SET` are rejected,
+with HTTP requests receiving a 400 response. All `exec` requests are also rejected until full-statement authorization is
+supported. This includes every `Coordinator.exec(...)` call, such as data loading, preloading, and DDL/DML. Mosaic
+pre-aggregation also uses `exec` to create schemas and tables, so set `preagg: { enabled: false }` in this mode.
+
 ## API
 
 The server supports queries via HTTP GET and POST, and WebSockets. The GET endpoint is useful for debugging. For example, you can query it with [this url](<http://localhost:3000/?query={"sql":"select 1","type":"json"}>).
@@ -427,8 +479,12 @@ Executes the SQL query in the `sql` field and returns the result in JSON format.
 Build the release binary with:
 
 ```sh
-go build -tags=duckdb_arrow -o duckdb-server-go .
+go build -o duckdb-server-go .
 ```
+
+This fork requires the `duckdb_arrow` build tag, which that line omits: build with
+`go build -tags=duckdb_arrow -o duckdb-server-go .`, and test with `go test -tags=duckdb_arrow ./...` — the same
+tag CI uses.
 
 ### Develop
 

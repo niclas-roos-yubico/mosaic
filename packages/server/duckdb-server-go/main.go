@@ -81,7 +81,7 @@ func run() int {
 		}
 	}
 
-	extensionInit := newExtensionInitializer(ctx, *extensionsStr) // FORK[extension-initializer]: install-once state must be created once, not per connection
+	extensionInit := newExtensionInitializer(ctx, *extensionsStr, platform.extensionFiles.paths()) // FORK[extension-initializer]: install-once state must be created once, not per connection
 	connector, err := duckdb.NewConnector(*dbPath, func(execer driver.ExecerContext) error {
 		return extensionInit(execer) // FORK[extension-initializer]: only the closure body changes, upstream's NewConnector call and brace are byte-identical
 	})

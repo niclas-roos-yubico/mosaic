@@ -13,6 +13,7 @@ type extensionInitializer struct {
 	ctx        context.Context
 	raw        string
 	names      []string
+	files      []string
 	mu         sync.Mutex
 	installed  bool
 	installErr error
@@ -24,8 +25,16 @@ type extensionInitializer struct {
 // cancellation/deadline so a shutdown signal on the original ctx cannot fail a new connection's
 // INSTALL/LOAD sequence, which (*duckdb.Connector).Connect would otherwise close and reject
 // silently.
-func newExtensionInitializer(ctx context.Context, raw string) func(driver.ExecerContext) error {
-	init := &extensionInitializer{ctx: context.WithoutCancel(ctx), raw: raw, names: extensionNames(raw)}
+// files are baked artifacts loaded by absolute path (--load-extension-file). They are loaded before
+// anything from a repository, on every connection, because a repository extension may depend on one
+// of them and because the Quack bootstrap's own connection must find quack already loaded.
+func newExtensionInitializer(ctx context.Context, raw string, files []string) func(driver.ExecerContext) error {
+	init := &extensionInitializer{
+		ctx:   context.WithoutCancel(ctx),
+		raw:   raw,
+		names: extensionNames(raw),
+		files: append([]string(nil), files...),
+	}
 	return init.initialize
 }
 
@@ -45,6 +54,11 @@ func extensionNames(raw string) []string {
 func (i *extensionInitializer) initialize(execer driver.ExecerContext) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	// Baked artifacts first, and unconditionally on every connection: DuckDB's loaded-extension set
+	// is per-connection, and a repository extension below may depend on one of these.
+	if err := loadExtensionFiles(i.ctx, execer, i.files); err != nil {
+		return err
+	}
 	if !i.installed {
 		i.installErr = extensions.ParseAndInstall(i.ctx, execer, i.raw)
 		i.installed = i.installErr == nil

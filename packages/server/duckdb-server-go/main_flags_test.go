@@ -56,6 +56,12 @@ func TestBinaryRejectsUnsafeModes(t *testing.T) {
 		{name: "zero result limit", args: []string{jwks, "--max-query-result-bytes=0"}, want: "--max-query-result-bytes must be positive"},
 		{name: "function blocklist", args: []string{jwks, "--function-blocklist=read_csv"}, want: "function blocklist is not permitted"},
 		{name: "schema match headers", args: []string{jwks, "--schema-match-headers=X-Tenant-Id"}, want: "--schema-match-headers is not permitted"},
+		// LOAD by absolute path is refused after the external-access latch, and the initializer fires on
+		// every connection, so permitting this in default mode would fail on pool growth, not at startup.
+		{name: "extension file without external access", args: []string{jwks, "--load-extension-file=/opt/ext/quack.duckdb_extension"}, want: "--load-extension-file requires --enable-external-access=true"},
+		{name: "extension file relative path", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=ext/quack.duckdb_extension"}, want: "must be an absolute path"},
+		{name: "extension file wrong suffix", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/quack.so"}, want: "must name a .duckdb_extension artifact"},
+		{name: "extension file missing", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/absent.duckdb_extension"}, want: "is not readable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,6 +141,7 @@ func TestUsageAdvertisesHardenedFlags(t *testing.T) {
 		"platform-session-jwks-url", "platform-jwt-iss", "platform-jwt-alg",
 		"enable-external-access", "disable-result-cache", "query-transaction-timeout",
 		"max-query-result-bytes", "quack-bootstrap-fd", "function-allowlist",
+		"load-extension-file",
 	} {
 		require.Contains(t, output, flag)
 	}

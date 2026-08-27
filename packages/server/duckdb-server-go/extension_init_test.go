@@ -29,7 +29,7 @@ func (f *recordingExecer) snapshot() []string {
 }
 
 func TestExtensionInitializerInstallsOnceThenLoads(t *testing.T) {
-	init := newExtensionInitializer(t.Context(), "json,httpfs,quack")
+	init := newExtensionInitializer(t.Context(), "json,httpfs,quack", nil)
 	fake := &recordingExecer{}
 	require.NoError(t, init(fake))
 	require.Equal(t, []string{
@@ -47,7 +47,7 @@ func TestExtensionInitializerInstallsOnceThenLoads(t *testing.T) {
 }
 
 func TestExtensionInitializerConcurrentCallsStillInstallOnce(t *testing.T) {
-	init := newExtensionInitializer(t.Context(), "json,httpfs,quack")
+	init := newExtensionInitializer(t.Context(), "json,httpfs,quack", nil)
 	fake := &recordingExecer{}
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
@@ -82,7 +82,7 @@ func (contextCheckingExecer) ExecContext(ctx context.Context, _ string, _ []driv
 
 func TestNewExtensionInitializerDetachesFromCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	init := newExtensionInitializer(ctx, "json")
+	init := newExtensionInitializer(ctx, "json", nil)
 	cancel()
 	require.NoError(t, init(contextCheckingExecer{}),
 		"initialize must not observe cancellation of the ctx passed to newExtensionInitializer")

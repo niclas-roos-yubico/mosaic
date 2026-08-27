@@ -29,6 +29,7 @@ func testPlatformConfig() *platformConfig {
 		jwksURL: &jwks, jwtIssuer: &issuer, jwtAlgorithm: &alg,
 		enableExternalAccess: &external, disableResultCache: &noCache,
 		transactionTimeout: &timeout, maxQueryResultBytes: &maxBytes, quackBootstrapFD: &fd,
+		extensionFiles: &extensionFileFlag{},
 	}
 }
 

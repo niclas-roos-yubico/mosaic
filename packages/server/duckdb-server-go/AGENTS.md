@@ -115,9 +115,16 @@ has no call site that must stay behind, so the move is always free.
 A marked site should be a single statement or declaration. If your edit inside
 an upstream file has a *body*, the body is in the wrong file.
 
-Named exceptions live in the inventory. `execCommand`'s exec-denial gate is the
-current legitimate one: a four-line guard whose entire purpose is to return
-before upstream's code runs.
+Named exceptions live in the inventory — thirteen of them, all the same shape:
+a guard whose entire purpose is to return before the code after it runs, which
+gofmt will not fold onto one line. `execCommand`'s exec-denial gate is the
+archetype.
+
+Read that number as bookkeeping catching up, not as the rule eroding. For a
+while only `pkg/query` registered this shape and the other two components
+carried it unregistered, which let the inventory state a bar the code did not
+meet. Registering is always cheaper than the alternative: if a marked site has
+a body and no row, the rule is not being enforced, it is being misreported.
 
 **Do not buy a shorter hook with a weaker guarantee.** Prefer a mechanism the
 compiler enforces over one that depends on a caller remembering. An extra

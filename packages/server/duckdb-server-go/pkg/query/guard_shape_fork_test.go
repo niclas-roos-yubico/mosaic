@@ -302,7 +302,7 @@ func TestQueryGoRetainsTheRouteDecisionOnTheReceiver(t *testing.T) {
 //
 //	transaction: o.Transaction      -> 11 tests red (the guard is disarmed package-wide)
 //	arrowPool:   newArrowPool(...)  -> 2 tests red (nil pool on the guarded path)
-//	validateGuardedOptions(o)       -> 1 test red (options_test.go)
+//	validateGuardedOptions(o)       -> 1 test red (options_fork_test.go)
 //	discardCacheIfDisabled(cache,o) -> NOTHING. Whole suite green with the hook gone.
 //
 // That last one is why this table exists. Losing it re-arms the cache read inside executeGuarded that transaction.go

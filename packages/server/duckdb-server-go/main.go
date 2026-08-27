@@ -131,7 +131,7 @@ func run() int {
 	}
 
 	// FORK[quack-bootstrap]: must start before the public listener; the connection is held for the process lifetime
-	closeQuack, err := startQuackIfConfigured(ctx, connector, *platform.quackBootstrapFD, logger)
+	closeQuack, quackStarted, err := startQuackIfConfigured(ctx, connector, *platform.quackBootstrapFD, logger)
 	if err != nil {
 		return 1
 	}
@@ -179,7 +179,7 @@ func run() int {
 		"function_allowlist":   functionAllowlist.String(),
 		"allowlist_configured": functionAllowlist.set,
 	}
-	platform.addLogFields(config) // FORK[redacted-startup-log]: fork keys are added beside upstream's literal so its 14 rows stay byte-identical
+	platform.addLogFields(config, quackStarted) // FORK[redacted-startup-log]: fork keys are added beside upstream's literal so its 14 rows stay byte-identical
 	logger.Info("DuckDB Server configuration", "config", config)
 
 	extensions, err := db.GetExtensions(ctx)

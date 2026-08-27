@@ -38,20 +38,36 @@ func TestAddLogFieldsCarriesEveryHardenedKeyAndNoSecret(t *testing.T) {
 	p.quackBootstrapFD = &fd
 
 	config := map[string]interface{}{"database": ":memory:"}
-	p.addLogFields(config)
+	p.addLogFields(config, true)
 
 	require.Equal(t, false, config["external_access_enabled"])
 	require.Equal(t, false, config["result_cache_disabled"])
 	require.Equal(t, "30s", config["query_transaction_timeout"])
 	require.Equal(t, int64(64<<20), config["max_query_result_bytes"])
-	require.Equal(t, true, config["quack_bootstrap_configured"])
+	require.Equal(t, true, config["quack_bootstrap_started"])
 	require.Equal(t, ":memory:", config["database"], "upstream's own keys must survive untouched")
 
-	// The descriptor number itself is never logged, only whether one is configured.
+	// The descriptor number itself is never logged, only whether the bootstrap ran.
 	require.NotContains(t, config, "quack_bootstrap_fd")
 	for key, value := range config {
 		require.NotEqual(t, 7, value, "descriptor number leaked into %q", key)
 	}
+}
+
+// A configured descriptor whose bootstrap did not run must log false. The old key was derived from
+// the flag, so a dropped quack-bootstrap hook logged `true` for a Quack that was never started --
+// the only signal an operator had, and it pointed the wrong way.
+func TestAddLogFieldsReportsTheOutcomeNotTheFlag(t *testing.T) {
+	p := testPlatformConfig()
+	fd := 7
+	p.quackBootstrapFD = &fd
+
+	config := map[string]interface{}{}
+	p.addLogFields(config, false)
+
+	require.Equal(t, false, config["quack_bootstrap_started"],
+		"the descriptor is configured but quack_serve never ran; logging true here is how a dropped "+
+			"hook stays invisible")
 }
 
 // applyQueryOptions resolves a slice of option funcs into the Options value they produce, so the
@@ -115,8 +131,8 @@ func TestQueryOptionsGateOnTheirFlags(t *testing.T) {
 // Thinning bought main.go's clean merge by making every fork edit textually disjoint from the
 // upstream code it modifies. That is exactly what makes a hook deletable: a resolver reading
 // `queryOptions = append(queryOptions, platform.queryOptions(...)...)` in isolation has nothing
-// telling them it is load-bearing. Nine of the thirteen slugs fail the build or an existing test
-// when deleted. Four do not -- they compile, the suite stays green, and the data plane silently
+// telling them it is load-bearing. Eight of the thirteen slugs fail the build or an existing test
+// when deleted. Five do not -- they compile, the suite stays green, and the data plane silently
 // loses a control:
 //
 //	query-options-hardened       the unconditional function allowlist and remote-URI-literal rejection
@@ -124,8 +140,12 @@ func TestQueryOptionsGateOnTheirFlags(t *testing.T) {
 //	exec-denial-authorizer       exec gate 1
 //	exec-denial-schema-resolver  exec gate 2, and pkg/server/server.go's CommandExec guard goes false,
 //	                             which re-enables exec entirely
+//	quack-bootstrap              Quack never starts; found 2026-08-27, after this comment had claimed
+//	                             four for long enough to be believed. The count is not the point --
+//	                             it was wrong once and may be wrong again. Delete a hook and boot the
+//	                             binary before trusting any line of this list.
 //
-// Asserting only that the `FORK[<slug>]` marker survives is not enough for those: three of them
+// Asserting only that the `FORK[<slug>]` marker survives is not enough for those: four of them
 // carry their marker on its own line above the statement, so the statement can be deleted while the
 // comment stays. Each entry therefore also pins a distinctive substring of the load-bearing code.
 const mainGoPath = "main.go"
@@ -160,6 +180,7 @@ var mainGoHookCode = []struct {
 	{"startup-validation", "platform.validate(", "the fail-fast rejection of unsafe flag combinations"},
 	{"query-options-hardened", "platform.queryOptions(", "the unconditional function allowlist and remote-URI-literal rejection"},
 	{"external-access-latch", "platform.latchExternalAccess(", "the external-access latch; DuckDB external access stays on in default mode"},
+	{"quack-bootstrap", "startQuackIfConfigured(", "the Quack bootstrap; quack_serve never runs, the mirror deployment has no Quack listener, and nothing is logged"},
 	{"exec-denial-authorizer", "platformauth.Authorizer()", "exec-denial gate 1"},
 	{"exec-denial-schema-resolver", "platformauth.SchemaResolver()", "exec-denial gate 2, which also flips pkg/server's CommandExec guard false and re-enables exec"},
 	{"session-middleware", "platformauth.Middleware(", "platform-session JWT validation on every request"},

@@ -126,23 +126,26 @@ func readQuackBootstrapFD(fd int) (quackBootstrapConfig, error) {
 // for the whole process lifetime or the writer dies. On success the closer is always non-nil --
 // including when Quack is disabled -- so run() defers it unconditionally with no branch. No path
 // here logs the descriptor number, the token, the config, or the payload.
-func startQuackIfConfigured(ctx context.Context, connector *duckdb.Connector, fd int, logger *slog.Logger) (func(), error) {
+//
+// The second return value reports whether quack_serve actually ran. It feeds addLogFields so the
+// startup log states the outcome rather than the flag; see the note there.
+func startQuackIfConfigured(ctx context.Context, connector *duckdb.Connector, fd int, logger *slog.Logger) (func(), bool, error) {
 	if fd < 3 {
-		return func() {}, nil
+		return func() {}, false, nil
 	}
 	cfg, err := readQuackBootstrapFD(fd)
 	if err != nil {
 		logger.Error("main: failed to read Quack bootstrap", "error", err)
-		return nil, err
+		return nil, false, err
 	}
 	conn, err := startQuack(ctx, connector, cfg)
 	if err != nil {
 		logger.Error("main: failed to start Quack", "error", err)
-		return nil, err
+		return nil, false, err
 	}
 	return func() {
 		if err := conn.Close(); err != nil {
 			logger.Error("main: failed to close Quack connection", "error", err)
 		}
-	}, nil
+	}, true, nil
 }

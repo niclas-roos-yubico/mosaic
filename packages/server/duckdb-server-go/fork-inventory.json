@@ -1,5 +1,5 @@
 {
-  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; it is 39 entries, and the entry count is what this file tracks, never the raw marker count (AGENTS.md rule 4). This branch integrates all three components of platform#z5x2, each developed separately off chore/z5x2-thin-main-go and merged here. Component 1, main.go: every site is a bodyless hook, deletions 35 -> 6 (irreducible: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s); entries rose 12 -> 13 deliberately, because exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver -- merging two security gates into one call site is how a fail-open gets built. Component 2, pkg/query: query.go 89 -> 7, validator.go 12 -> 0, entries 28 -> 17. It settled two conventions that apply everywhere from now on -- one logical modification spanning two files gets one slug PER FILE (result-cache-discard in query.go plus result-cache-option in options.go), and SIX rule-4 exceptions are registered rather than the five its plan named, because guarded-option-validation is structurally the same one-statement-with-a-body as the four route preludes and registering five would have this file assert a bar the code does not meet. Components 3+4, pkg/server and README: server.go 18 -> 12, options.go 3 -> 0, README.md 49 -> 1, with 7 of those recovered by moving markers to end-of-line inside aligned blocks rather than by relocating any logic. Deleting each of pkg/server's 9 hooks and rebuilding showed none can be lost silently -- 4 fail the build, 5 turn an existing test red -- which is why pkg/server carries no SYNC HAZARD clause where main.go carries four; pkg/server/fork_source_test.go pins that property so it stays true.",
+  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; it is 39 entries, and the entry count is what this file tracks, never the raw marker count (AGENTS.md rule 4). This branch integrates all three components of platform#z5x2, each developed separately off chore/z5x2-thin-main-go and merged here. Component 1, main.go: deletions 35 -> 6 (irreducible: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s); entries rose 12 -> 13 deliberately, because exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver -- merging two security gates into one call site is how a fail-open gets built. Component 2, pkg/query: query.go 89 -> 7, validator.go 12 -> 0, entries 28 -> 17. It settled two conventions that apply everywhere from now on -- one logical modification spanning two files gets one slug PER FILE (result-cache-discard in query.go plus result-cache-option in options.go), and SIX rule-4 exceptions are registered rather than the five its plan named, because guarded-option-validation is structurally the same one-statement-with-a-body as the four route preludes and registering five would have this file assert a bar the code does not meet. CORRECTION 2026-08-27: pkg/query was the only component that applied that reading. main.go's claim that 'every site is a bodyless hook' was false -- startup-validation, external-access-latch, quack-bootstrap and jwt-validator are the identical `if err := f(); err != nil { return 1 }` construct, and pkg/server's two requestSchemas hooks and guarded-error-mapping have bodies too. All six are now registered, bringing the package to thirteen exceptions. The number rose because the bar stopped moving per component, not because anything was relaxed. Components 3+4, pkg/server and README: server.go 18 -> 12, options.go 3 -> 0, README.md 49 -> 1, with 7 of those recovered by moving markers to end-of-line inside aligned blocks rather than by relocating any logic. Deleting each of pkg/server's 9 hooks and rebuilding showed none can be lost silently -- 4 fail the build, 5 turn an existing test red -- which is why pkg/server carries no SYNC HAZARD clause where main.go carries four; pkg/server/fork_source_test.go pins that property so it stays true.",
   "upstream_base": "32986b4e",
   "upstream_base_ref": "v0.31.0",
   "root_allowlist": [
@@ -28,15 +28,16 @@
     "pkg/query/guarded.go",
     "pkg/query/limited_buffer.go",
     "pkg/query/limited_buffer_test.go",
+    "pkg/query/options_fork_test.go",
     "pkg/query/transaction.go",
     "pkg/query/transaction_test.go",
     "pkg/query/validate_on.go",
     "pkg/query/writer_test.go",
+    "pkg/server/errors_fork_test.go",
+    "pkg/server/fork_source_test.go",
     "pkg/server/schema_resolver.go",
     "pkg/server/schema_resolver_test.go",
-    "pkg/server/websocket_session.go",
-    "pkg/server/errors_fork_test.go",
-    "pkg/server/fork_source_test.go"
+    "pkg/server/websocket_session.go"
   ],
   "entries": [
     {
@@ -52,7 +53,7 @@
     {
       "slug": "startup-validation",
       "file": "main.go",
-      "why": "fail-fast flag-combination checks must run after flag.Parse and before any resource is allocated"
+      "why": "fail-fast flag-combination checks must run after flag.Parse and before any resource is allocated RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
     },
     {
       "slug": "extension-initializer",
@@ -67,17 +68,17 @@
     {
       "slug": "external-access-latch",
       "file": "main.go",
-      "why": "latch must fire after INSTALL and before any query-serving connection; ordering is the security property. SYNC HAZARD: this hook is textually disjoint from the upstream code it sits between, so a merge resolution can drop it with NO conflict and a green go build, after which DuckDB external access stays on for the whole process in default mode. Never delete it; platform_test.go's TestMainGoRetainsLoadBearingHookCode is the only check that catches the loss"
+      "why": "latch must fire after INSTALL and before any query-serving connection; ordering is the security property. SYNC HAZARD: this hook is textually disjoint from the upstream code it sits between, so a merge resolution can drop it with NO conflict and a green go build, after which DuckDB external access stays on for the whole process in default mode. Never delete it; platform_test.go's TestMainGoRetainsLoadBearingHookCode is the only check that catches the loss RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
     },
     {
       "slug": "quack-bootstrap",
       "file": "main.go",
-      "why": "bootstrap must start before the public listener and its connection is held for the process lifetime via defer in run()"
+      "why": "bootstrap must start before the public listener and its connection is held for the process lifetime via defer in run() RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate. COMPILER-PROTECTED since 2026-08-27: the hook now returns quackStarted, which addLogFields names, so deleting it no longer builds. Before that it was the one hook in this package that could be dropped in silence -- build green, suite green, and the startup log still said the bootstrap was configured."
     },
     {
       "slug": "jwt-validator",
       "file": "main.go",
-      "why": "validator construction; audience is hardcoded in platform.go, never operator-settable"
+      "why": "validator construction; audience is hardcoded in platform.go, never operator-settable RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
     },
     {
       "slug": "exec-denial-authorizer",
@@ -127,7 +128,7 @@
     {
       "slug": "ws-request-schemas",
       "file": "pkg/server/server.go",
-      "why": "websocket handler must use the resolver rather than headers. MARKER HAZARD: the marker sits on its own line above the statement (a standalone comment is correct here -- this is not an aligned block), so a resolution can drop the comment and leave working code with no inventory trail. Reverting the code itself fails the build, because resolution feeds beginWebSocketSession; pkg/server/fork_source_test.go pins both halves"
+      "why": "websocket handler must use the resolver rather than headers. MARKER HAZARD: the marker sits on its own line above the statement (a standalone comment is correct here -- this is not an aligned block), so a resolution can drop the comment and leave working code with no inventory trail. Reverting the code itself fails the build, because resolution feeds beginWebSocketSession; pkg/server/fork_source_test.go pins both halves RULE-4 EXCEPTION: three statements including an `if err != nil` body. Upstream's single getAllowedSchemas call has no error path, so the resolver's cannot be additive; requestSchemas in fork-owned schema_resolver.go already holds everything that could move."
     },
     {
       "slug": "ws-message-query-ctx",
@@ -137,7 +138,7 @@
     {
       "slug": "http-request-schemas",
       "file": "pkg/server/server.go",
-      "why": "http handler must use the resolver rather than headers. MARKER HAZARD: same standalone-marker shape as ws-request-schemas, and this is the weaker of the two -- reverting the code to getAllowedSchemas compiles, so only the suite (not the compiler) turns it red. pkg/server/fork_source_test.go pins the call count at 2 so reverting one handler and not the other is red on its own terms"
+      "why": "http handler must use the resolver rather than headers. MARKER HAZARD: same standalone-marker shape as ws-request-schemas, and this is the weaker of the two -- reverting the code to getAllowedSchemas compiles, so only the suite (not the compiler) turns it red. pkg/server/fork_source_test.go pins the call count at 2 so reverting one handler and not the other is red on its own terms RULE-4 EXCEPTION: same three-statement shape as ws-request-schemas."
     },
     {
       "slug": "exec-schema-policy-gate",
@@ -147,7 +148,7 @@
     {
       "slug": "guarded-error-mapping",
       "file": "pkg/server/errors.go",
-      "why": "byte-cap and deadline errors must not be classified as generic bad_request"
+      "why": "byte-cap and deadline errors must not be classified as generic bad_request RULE-4 EXCEPTION: two switch arms with two-line bodies. They must precede upstream's 400/403 arms, and a switch arm cannot delegate its body without a second dispatch."
     },
     {
       "slug": "validatesql-ast-delegate",
@@ -238,7 +239,7 @@
     }
   ],
   "deletions": {
-    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the five module-rename import lines in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged.",
+    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the four module-rename import lines remaining in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged.",
     "pkg/server/server.go": 12,
     "pkg/query/query.go": 7,
     "main.go": 6,

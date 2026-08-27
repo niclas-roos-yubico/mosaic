@@ -136,12 +136,19 @@ func (p *platformConfig) latchExternalAccess(ctx context.Context, db *query.DB, 
 // X-Platform-Session. It exists so upstream's map literal stays byte-identical -- inlining these
 // keys pushed gofmt's alignment column out past upstream's longest 20-character key and rewrote all
 // 14 of its rows, which cost 14 deletions on the fork's highest-churn file.
-func (p *platformConfig) addLogFields(config map[string]interface{}) {
+//
+// quackStarted is the OUTCOME reported by startQuackIfConfigured, not the flag. It is a parameter
+// rather than a read of p.quackBootstrapFD because the two can disagree: a merge that drops the
+// quack-bootstrap hook leaves the descriptor flag set while nothing ever calls quack_serve, and the
+// old flag-derived key logged `true` for a Quack that was not running. Measured 2026-08-27 by
+// deleting the hook and booting the binary: the port was closed, no error was logged, and this line
+// was the only thing an operator had to go on. Never derive it from the flag again.
+func (p *platformConfig) addLogFields(config map[string]interface{}, quackStarted bool) {
 	config["external_access_enabled"] = *p.enableExternalAccess
 	config["result_cache_disabled"] = *p.disableResultCache
 	config["query_transaction_timeout"] = p.transactionTimeout.String()
 	config["max_query_result_bytes"] = *p.maxQueryResultBytes
-	config["quack_bootstrap_configured"] = *p.quackBootstrapFD >= 3
+	config["quack_bootstrap_started"] = quackStarted
 }
 
 // newSessionValidator builds the platform session JWT validator. The audience is hardcoded to

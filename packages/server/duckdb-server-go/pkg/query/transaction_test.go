@@ -29,7 +29,7 @@ func TestPooledArrowCarriesTheSameDriverConnection(t *testing.T) {
 
 	tx, err := pc.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	require.NoError(t, execOn(t.Context(), pc.conn,
 		`CREATE TEMP TABLE same_conn_probe AS SELECT 'marker' AS value`))
 
@@ -213,7 +213,7 @@ func (w *checkpointWriter) Write(p []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := execOn(ctx, conn, `CHECKPOINT`); err != nil {
 		return 0, err
 	}

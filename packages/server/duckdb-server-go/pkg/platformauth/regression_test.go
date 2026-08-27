@@ -181,7 +181,7 @@ func TestRegressionWebSocketClosesAtJWTExpiry(t *testing.T) {
 		HTTPHeader: http.Header{platformauth.SessionHeader: []string{s.token(t, []string{"tenant_a"}, 2*time.Second)}},
 	})
 	require.NoError(t, err)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	require.NoError(t, wsjson.Write(ctx, conn, map[string]any{
 		"type": "json", "sql": "SELECT * FROM tenant_a.safe",
 	}))

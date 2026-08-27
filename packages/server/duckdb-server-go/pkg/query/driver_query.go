@@ -30,7 +30,10 @@ func scalarOn(ctx context.Context, conn driver.Conn, statement string, args ...d
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// Discarded deliberately: every read failure this function can suffer is already returned from
+	// rows.Next below, and the single value is fully materialized before Close runs. Nothing is
+	// buffered, so unlike a write path there is no flush whose failure could only surface here.
+	defer func() { _ = rows.Close() }()
 	values := make([]driver.Value, len(rows.Columns()))
 	if err := rows.Next(values); err != nil {
 		if errors.Is(err, io.EOF) {

@@ -1,12 +1,14 @@
 name: Test
 
+# FORK: upstream restricts both triggers to main. This fork develops on stacked branches -- a
+# component PR targets an integration branch, which targets main -- so under upstream's filter no
+# CI ran on PRs #1, #2 or #3 at all, and the first Linux run of any fork code was PR #4. It found a
+# Linux-only failure that had been merged a month earlier. Run on every PR regardless of base.
 on:
   push:
     branches:
       - main
   pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -186,12 +188,17 @@ jobs:
         run: go build -tags=duckdb_arrow -v ./...
         working-directory: ./packages/server/duckdb-server-go
 
+      # FORK: -race added. AGENTS.md's PR checklist requires `go test -tags=duckdb_arrow -race`,
+      # so without it CI enforced a weaker bar than the contract it exists to enforce.
       - name: Test
-        run: go test -tags=duckdb_arrow -v ./...
+        run: go test -tags=duckdb_arrow -race -v ./...
         working-directory: ./packages/server/duckdb-server-go
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # FORK: pinned. `latest` means a new golangci-lint release can turn this repo red with no
+          # code change -- during an upstream sync that is indistinguishable from a merge mistake.
+          # Bump deliberately, with the new version's findings fixed in the same commit.
+          version: v2.12.2
           working-directory: ./packages/server/duckdb-server-go

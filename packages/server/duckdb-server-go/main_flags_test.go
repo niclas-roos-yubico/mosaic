@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// FORK: subprocess flag/startup-validation tests for Task 10. The module does not compile without
+// Subprocess flag/startup-validation tests. The module does not compile without
 // -tags=duckdb_arrow (see .golangci.yaml and README.md), so buildTestBinary must pass it through to
 // the subprocess `go build` or every case below fails with an unrelated build error.
 func buildTestBinary(t *testing.T) string {

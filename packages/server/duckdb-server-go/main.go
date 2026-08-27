@@ -125,11 +125,6 @@ func run() int {
 	}
 	defer db.Close()
 
-	// FORK[external-access-latch]: must fire after INSTALL and before any query-serving connection; ordering is the security property
-	if err := platform.latchExternalAccess(ctx, db, logger); err != nil {
-		return 1
-	}
-
 	// FORK[quack-bootstrap]: must start before the public listener; the connection is held for the process lifetime
 	closeQuack, quackStarted, err := startQuackIfConfigured(ctx, connector, *platform.quackBootstrapFD, logger)
 	if err != nil {
@@ -185,6 +180,12 @@ func run() int {
 	extensions, err := db.GetExtensions(ctx)
 	if err != nil {
 		logger.Error("main: error getting extensions", "error", err)
+		return 1
+	}
+
+	// FORK[external-access-latch]: must fire after INSTALL and after upstream's GetExtensions, which reads the
+	// extension directory, and before the listener below; ordering is the security property
+	if err := platform.latchExternalAccess(ctx, db, logger); err != nil {
 		return 1
 	}
 

@@ -214,6 +214,23 @@ func TestMainGoRetainsLoadBearingHookCode(t *testing.T) {
 	}
 }
 
+// TestMainGoLatchesExternalAccessBeforeTheListener pins the latch's remaining ordering bound in
+// source. platform#azfv moved the call down past upstream's db.GetExtensions, which reads the
+// extension directory and so cannot run latched -- which also moved it to within a few lines of
+// http.ListenAndServe, where "before any query-serving connection" stops being self-evident from
+// reading run() top to bottom. TestBinaryBootsInDefaultMode covers the lower bound (too early and
+// the process exits 1); this covers the upper one (too late and the data plane serves unlatched).
+func TestMainGoLatchesExternalAccessBeforeTheListener(t *testing.T) {
+	source := readMainGo(t)
+	latch := strings.Index(source, "platform.latchExternalAccess(")
+	require.NotEqual(t, -1, latch, "the external-access latch call is gone from main.go")
+	listener := strings.Index(source, "http.ListenAndServe")
+	require.NotEqual(t, -1, listener, "main.go no longer starts a listener; this guard cannot mean anything")
+	require.Less(t, latch, listener,
+		"main.go latches external access after starting the listener: requests can be served with DuckDB "+
+			"external access still live. The latch must sit between the startup extension listing and the listener")
+}
+
 // TestForkInventoryAndMainGoAgreeOnSlugs pins the correspondence in both directions, so a hook added
 // without a row, a row left behind after a hook is removed, and this file's own slug list drifting
 // out of date are all red rather than silent.

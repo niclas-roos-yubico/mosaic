@@ -112,6 +112,12 @@ func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionF
 // query-serving connection is opened. Quack mode requires --enable-external-access=true and is
 // mutually exclusive with this path, so this is always skipped -- never entered -- when Quack is
 // active. See pkg/query/external_access_global_test.go.
+//
+// The upper bound is not the only constraint: upstream's db.GetExtensions reads the extension
+// directory off disk, so it must also run BEFORE this latch or the process exits 1 in default mode
+// without ever reaching its listener (platform#azfv). Both bounds are met by calling this
+// immediately after that listing. Moving it back above GetExtensions reintroduces the crash;
+// TestBinaryBootsInDefaultMode is what catches that.
 func (p *platformConfig) latchExternalAccess(ctx context.Context, db *query.DB, logger *slog.Logger) error {
 	if *p.enableExternalAccess {
 		return nil

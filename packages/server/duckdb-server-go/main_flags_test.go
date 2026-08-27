@@ -2,10 +2,15 @@ package main
 
 import (
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -59,6 +64,67 @@ func TestBinaryRejectsUnsafeModes(t *testing.T) {
 			require.Contains(t, output, tt.want)
 		})
 	}
+}
+
+// TestBinaryBootsInDefaultMode is the gap platform#azfv fell through: every other subprocess case
+// asserts a *rejection*, so the binary spent the whole thinning unable to reach its own listener in
+// default mode -- the external-access latch fired before upstream's db.GetExtensions, which reads the
+// extension directory -- with the entire suite green. Nothing here is about flags; it asserts only
+// that default mode starts, serves, and denies. Reproduces with an empty HOME too, so it does not
+// depend on the runner having extensions installed.
+func TestBinaryBootsInDefaultMode(t *testing.T) {
+	binary := buildTestBinary(t)
+
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"keys":[]}`))
+	}))
+	defer jwks.Close()
+
+	logPath := filepath.Join(t.TempDir(), "server.log")
+	logFile, err := os.Create(logPath)
+	require.NoError(t, err)
+	defer func() { _ = logFile.Close() }()
+	// Read the log back off disk rather than sharing a buffer with the subprocess: -race flags a
+	// concurrent read of an io.Writer the exec goroutine is still writing to.
+	serverLog := func() string {
+		payload, _ := os.ReadFile(logPath)
+		return string(payload)
+	}
+
+	port := freePort(t)
+	cmd := exec.Command(binary, "--platform-session-jwks-url="+jwks.URL, "--port="+port)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	require.NoError(t, cmd.Start())
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	var resp *http.Response
+	for range 100 {
+		resp, err = http.Get("http://localhost:" + port + "/")
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.NoError(t, err, "default mode never reached its listener; server log:\n%s", serverLog())
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"default mode must reject an unauthenticated request, not merely start; server log:\n%s", serverLog())
+}
+
+// freePort asks the kernel for an unused port and immediately gives it back. Racy in principle;
+// the alternative is parsing the listener address out of the subprocess's log, which is more code
+// for a narrower guarantee.
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = l.Close() }()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 }
 
 func TestUsageAdvertisesHardenedFlags(t *testing.T) {

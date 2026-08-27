@@ -70,7 +70,7 @@ func TestWebSocketClosesAtResolvedExpiry(t *testing.T) {
 	srv := newWebSocketTestServer(t, h)
 	conn, _, err := srv.dial(nil)
 	require.NoError(t, err)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	_, _, err = conn.Read(ctx)
@@ -112,7 +112,7 @@ func TestWebSocketQueryContextCarriesResolvedExpiry(t *testing.T) {
 	srv := newWebSocketTestServer(t, h)
 	conn, _, err := srv.dial(nil)
 	require.NoError(t, err)
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	require.NoError(t, wsjson.Write(srv.ctx, conn, map[string]any{
 		"type": CommandJSON,

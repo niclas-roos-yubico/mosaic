@@ -35,23 +35,13 @@ type Options struct {
 	// RejectRemoteURILiterals rejects recognized remote URI literals in reviewed path arguments and replacement scans.
 	RejectRemoteURILiterals bool
 
-	// FORK: Transaction, when non-nil, enables the bounded guarded-execution coordinator (Task 7): every query
-	// runs inside a single transaction on one pinned connection, with a deadline and a byte-capped result buffer.
+	// FORK[guarded-mode-option]: non-nil arms the bounded guarded-execution coordinator. TransactionOptions and its
+	// validation live in guarded.go.
 	Transaction *TransactionOptions
 
-	// FORK: DisableResultCache turns off the *sql.DB result cache entirely. New rejects Transaction != nil unless
-	// this is also true, so a mirror deployment can never serve a stale, pre-authorization cached result.
+	// FORK[result-cache-option]: turns off the otter result cache entirely (see discardCacheIfDisabled in
+	// guarded.go). New requires this whenever Transaction != nil.
 	DisableResultCache bool
-}
-
-// FORK: TransactionOptions configures the Task 7 guarded-execution coordinator: how long a guarded query may run
-// before its connection is discarded, and how many encoded bytes its response may occupy before being rejected.
-type TransactionOptions struct {
-	// Timeout bounds the guarded transaction's lifetime, including validation, catalog checks, and execution.
-	Timeout time.Duration
-
-	// MaxResultBytes caps the number of encoded response bytes buffered before being released to the client.
-	MaxResultBytes int64
 }
 
 // FunctionAllowlistOptions configures an allowlist from reviewed defaults and exact function names.
@@ -138,10 +128,8 @@ func WithRemoteURILiteralRejection() OptionFunc {
 	}
 }
 
-// FORK: WithTransactionalCatalogGuard enables the Task 7 bounded guarded-execution coordinator: every query
-// validates and authorizes against the live catalog as the first statement of a transaction pinned to one
-// connection, then executes and buffers its response up to options.MaxResultBytes before the transaction commits.
-// New rejects this option unless WithResultCacheDisabled is also supplied.
+// FORK[guarded-mode-option]: arms the bounded guarded-execution coordinator; TransactionOptions and its validation
+// live in guarded.go. New rejects this option unless WithResultCacheDisabled is also supplied.
 func WithTransactionalCatalogGuard(options TransactionOptions) OptionFunc {
 	return func(opts *Options) error {
 		opts.Transaction = &TransactionOptions{Timeout: options.Timeout, MaxResultBytes: options.MaxResultBytes}
@@ -149,8 +137,8 @@ func WithTransactionalCatalogGuard(options TransactionOptions) OptionFunc {
 	}
 }
 
-// FORK: WithResultCacheDisabled turns off the *sql.DB result cache entirely, so New never constructs an otter
-// cache. Required alongside WithTransactionalCatalogGuard.
+// FORK[result-cache-option]: makes New leave db.cache nil (see discardCacheIfDisabled in guarded.go). Required
+// alongside WithTransactionalCatalogGuard.
 func WithResultCacheDisabled() OptionFunc {
 	return func(opts *Options) error {
 		opts.DisableResultCache = true

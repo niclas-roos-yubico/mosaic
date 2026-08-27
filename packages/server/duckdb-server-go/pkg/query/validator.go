@@ -66,7 +66,7 @@ func (e ErrorDetails) Is(target error) bool {
 }
 
 // ValidateSQL validates the given SQL query using the provided validators
-// FORK: parses the AST via db.db.QueryRowContext (unchanged) but delegates AST validation to the extracted
+// FORK[validatesql-ast-delegate]: parses the AST via db.db.QueryRowContext (unchanged) but delegates AST validation to the extracted
 // validateParsedAST, which is shared with the connection-pinned validateSQLOn below.
 func (db *DB) ValidateSQL(ctx context.Context, sql string, validators ...Validator) error {
 	// Qualify the built-in to prevent database macros from shadowing validation.
@@ -82,7 +82,7 @@ func (db *DB) ValidateSQL(ctx context.Context, sql string, validators ...Validat
 	return validateParsedAST(m, validators...)
 }
 
-// FORK: validateParsedAST is the AST-validation half extracted from ValidateSQL's body, so that it can be reused by
+// FORK[validate-parsed-ast]: validateParsedAST is the AST-validation half extracted from ValidateSQL's body, so that it can be reused by
 // validateSQLOn, which parses the AST on a specific driver.Conn instead of through db.db.
 func validateParsedAST(m map[string]any, validators ...Validator) error {
 	parseError, ok := m["error"].(bool)
@@ -104,23 +104,30 @@ func validateParsedAST(m map[string]any, validators ...Validator) error {
 	}
 
 	// Extract all schema references, including tables without an explicit schema reference, from the AST
-	for _, statement := range statements {
-		mapped, ok := statement.(map[string]any)
+	for _, stmt := range statements {
+		stmtMap, ok := stmt.(map[string]any)
 		if !ok {
-			return fmt.Errorf("invalid statement format: %v", statement)
+			return fmt.Errorf("invalid statement format: %v", stmt)
 		}
 
-		walkAST(mapped, make([]string, 0, 10), validators)
+		keyStack := make([]string, 0, 10)
+
+		walkAST(stmtMap, keyStack, validators)
 	}
 
-	var combined []error
+	var combinedErrs []error
+
 	for _, validator := range validators {
-		combined = append(combined, validator.Validate()...)
+		validationErrs := validator.Validate()
+		if len(validationErrs) > 0 {
+			combinedErrs = append(combinedErrs, validationErrs...)
+		}
 	}
-	return errors.Join(combined...)
+
+	return errors.Join(combinedErrs...)
 }
 
-// FORK: new function. validateSQLOn parses and validates SQL on a specific driver.Conn (bypassing db.db), so that
+// FORK[validate-sql-on]: new function. validateSQLOn parses and validates SQL on a specific driver.Conn (bypassing db.db), so that
 // parsing participates in a transaction already open on conn.
 func validateSQLOn(ctx context.Context, conn driver.Conn, submitted string, validators ...Validator) error {
 	statement := fmt.Sprintf("SELECT system.main.json_serialize_sql(%s, skip_default := true, skip_empty := true, skip_null := true) AS ast", quoteLiteral(submitted))
@@ -146,7 +153,7 @@ func validateSQLOn(ctx context.Context, conn driver.Conn, submitted string, vali
 	return validateParsedAST(parsed, validators...)
 }
 
-// FORK: new type. relationCollector is a Validator that records every BASE_TABLE reference the AST walk visits, so
+// FORK[relation-collector]: new type. relationCollector is a Validator that records every BASE_TABLE reference the AST walk visits, so
 // callers of validateQueryOn can run a live catalog check (Task 6) against exactly the tables the query touches.
 // It never rejects anything itself (Validate always returns nil); it only collects.
 type relationCollector struct{ refs map[tableRef]struct{} }

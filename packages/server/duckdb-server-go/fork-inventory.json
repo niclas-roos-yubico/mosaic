@@ -1,0 +1,274 @@
+{
+  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; it is 39 entries, and the entry count is what this file tracks, never the raw marker count (AGENTS.md rule 4). This branch integrates all three components of platform#z5x2, each developed separately off chore/z5x2-thin-main-go and merged here. Component 1, main.go: deletions 35 -> 6 (irreducible: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s); entries rose 12 -> 13 deliberately, because exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver -- merging two security gates into one call site is how a fail-open gets built. Component 2, pkg/query: query.go 89 -> 7, validator.go 12 -> 0, entries 28 -> 17. It settled two conventions that apply everywhere from now on -- one logical modification spanning two files gets one slug PER FILE (result-cache-discard in query.go plus result-cache-option in options.go), and SIX rule-4 exceptions are registered rather than the five its plan named, because guarded-option-validation is structurally the same one-statement-with-a-body as the four route preludes and registering five would have this file assert a bar the code does not meet. CORRECTION 2026-08-27: pkg/query was the only component that applied that reading. main.go's claim that 'every site is a bodyless hook' was false -- startup-validation, external-access-latch, quack-bootstrap and jwt-validator are the identical `if err := f(); err != nil { return 1 }` construct, and pkg/server's two requestSchemas hooks and guarded-error-mapping have bodies too. All six are now registered, bringing the package to thirteen exceptions. The number rose because the bar stopped moving per component, not because anything was relaxed. Components 3+4, pkg/server and README: server.go 18 -> 12, options.go 3 -> 0, README.md 49 -> 1, with 7 of those recovered by moving markers to end-of-line inside aligned blocks rather than by relocating any logic. Deleting each of pkg/server's 9 hooks and rebuilding showed none can be lost silently -- 4 fail the build, 5 turn an existing test red -- which is why pkg/server carries no SYNC HAZARD clause where main.go carries four; pkg/server/fork_source_test.go pins that property so it stays true.",
+  "upstream_base": "32986b4e",
+  "upstream_base_ref": "v0.31.0",
+  "root_allowlist": [
+    ".github/workflows/test.yml"
+  ],
+  "fork_owned": [
+    "extension_init.go",
+    "extension_init_test.go",
+    "main_flags_test.go",
+    "platform.go",
+    "platform_test.go",
+    "quack_bootstrap.go",
+    "quack_bootstrap_test.go",
+    "pkg/platformauth/jwt.go",
+    "pkg/platformauth/jwt_test.go",
+    "pkg/platformauth/platformauth.go",
+    "pkg/platformauth/platformauth_test.go",
+    "pkg/platformauth/regression_test.go",
+    "pkg/query/arrow_pool.go",
+    "pkg/query/catalog_guard_test.go",
+    "pkg/query/driver_query.go",
+    "pkg/query/external_access.go",
+    "pkg/query/external_access_global_test.go",
+    "pkg/query/external_access_test.go",
+    "pkg/query/guard_shape_fork_test.go",
+    "pkg/query/guarded.go",
+    "pkg/query/limited_buffer.go",
+    "pkg/query/limited_buffer_test.go",
+    "pkg/query/options_fork_test.go",
+    "pkg/query/transaction.go",
+    "pkg/query/transaction_test.go",
+    "pkg/query/validate_on.go",
+    "pkg/query/writer_test.go",
+    "pkg/server/errors_fork_test.go",
+    "pkg/server/fork_source_test.go",
+    "pkg/server/schema_resolver.go",
+    "pkg/server/schema_resolver_test.go",
+    "pkg/server/websocket_session.go"
+  ],
+  "entries": [
+    {
+      "slug": "jwt-auth-import",
+      "file": "main.go",
+      "why": "platformauth import; the two exec-denial option hooks and the middleware wrap all name it"
+    },
+    {
+      "slug": "platform-flags",
+      "file": "main.go",
+      "why": "hardened-mode flags must be declared on the default FlagSet before upstream's flag.Parse"
+    },
+    {
+      "slug": "startup-validation",
+      "file": "main.go",
+      "why": "fail-fast flag-combination checks must run after flag.Parse and before any resource is allocated RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
+    },
+    {
+      "slug": "extension-initializer",
+      "file": "main.go",
+      "why": "install-once state is created once, not per connection; only the closure body changes, upstream's NewConnector call and brace are byte-identical"
+    },
+    {
+      "slug": "query-options-hardened",
+      "file": "main.go",
+      "why": "the data plane's query options are unconditional, so they append after upstream's assembly rather than replacing it. SYNC HAZARD: this line names upstream's queryOptions local. A rename upstream merges with NO conflict (the hunks are disjoint) and leaves this line dangling -- deleting it as dead code silently drops the reviewed function allowlist and remote-URI-literal rejection. Re-point it at the new name; never delete it. Always run go build -tags=duckdb_arrow after a trial merge -- but note go build does NOT catch the deletion, only the rename: platform_test.go's TestMainGoRetainsLoadBearingHookCode is what turns the deletion red"
+    },
+    {
+      "slug": "external-access-latch",
+      "file": "main.go",
+      "why": "latch must fire after INSTALL and before any query-serving connection; ordering is the security property. It also has a LOWER bound, found the hard way as platform#azfv: upstream's db.GetExtensions reads the extension directory, so a latch above it exits the process 1 in default mode before it ever listens. The call therefore sits immediately after that listing, between the two bounds; TestBinaryBootsInDefaultMode holds the lower one and TestMainGoLatchesExternalAccessBeforeTheListener the upper. SYNC HAZARD: this hook is textually disjoint from the upstream code it sits between, so a merge resolution can drop it with NO conflict and a green go build, after which DuckDB external access stays on for the whole process in default mode. Never delete it; platform_test.go's TestMainGoRetainsLoadBearingHookCode is the only check that catches the loss RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
+    },
+    {
+      "slug": "quack-bootstrap",
+      "file": "main.go",
+      "why": "bootstrap must start before the public listener and its connection is held for the process lifetime via defer in run() RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate. COMPILER-PROTECTED since 2026-08-27: the hook now returns quackStarted, which addLogFields names, so deleting it no longer builds. Before that it was the one hook in this package that could be dropped in silence -- build green, suite green, and the startup log still said the bootstrap was configured."
+    },
+    {
+      "slug": "jwt-validator",
+      "file": "main.go",
+      "why": "validator construction; audience is hardcoded in platform.go, never operator-settable RULE-4 EXCEPTION: a guard whose whole purpose is to return before the code after it runs. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists; registering it is the honest alternative to asserting a bar this site does not meet. Same shape as pkg/query's six and execCommand's blessed gate."
+    },
+    {
+      "slug": "exec-denial-authorizer",
+      "file": "main.go",
+      "why": "gate 1 of three independent exec denials; deliberately kept separate from the resolver hook (AGENTS.md rule 4 -- merging them produced a fail-open in a dry run). SYNC HAZARD: this hook is one argument inside upstream's server.New call, so a merge resolution can drop it with NO conflict and a green go build, after which gate 1 is gone and nothing else fails. Never delete it; platform_test.go's TestMainGoRetainsLoadBearingHookCode is the only check that catches the loss"
+    },
+    {
+      "slug": "exec-denial-schema-resolver",
+      "file": "main.go",
+      "why": "gate 2 of three; arms the schema-policy guard in pkg/server's execCommand. SYNC HAZARD: this hook is one argument inside upstream's server.New call, so a merge resolution can drop it with NO conflict and a green go build -- and the loss is worse than gate 2 alone, because pkg/server/server.go's CommandExec guard then sees a nil resolver, goes false, and re-enables exec. Never delete it; platform_test.go's TestMainGoRetainsLoadBearingHookCode is the only check that catches the loss"
+    },
+    {
+      "slug": "session-middleware",
+      "file": "main.go",
+      "why": "wraps the server handler in JWT middleware; every request must carry a validated session before it reaches s"
+    },
+    {
+      "slug": "redacted-startup-log",
+      "file": "main.go",
+      "why": "hardened-mode fields are added beside upstream's literal so its 14 rows stay byte-identical; the log must never carry the Quack fd, token or session header"
+    },
+    {
+      "slug": "listener-serves-middleware",
+      "file": "main.go",
+      "why": "listener serves the wrapped handler; upstream names s directly so this cannot be additive"
+    },
+    {
+      "slug": "config-schema-resolver",
+      "file": "pkg/server/options.go",
+      "why": "resolver field on upstream's private config struct"
+    },
+    {
+      "slug": "handler-schema-resolver-field",
+      "file": "pkg/server/server.go",
+      "why": "resolver must be reachable from upstream's handler methods"
+    },
+    {
+      "slug": "handler-schema-resolver-assign",
+      "file": "pkg/server/server.go",
+      "why": "assignment in upstream's newHandler"
+    },
+    {
+      "slug": "ws-session-bounds",
+      "file": "pkg/server/server.go",
+      "why": "session lifecycle (expiry close, query deadline, single-source close) lives in websocket_session.go; the call and its defer must sit inside upstream's handleWebSocket. Replaces upstream's deferred conn.Close, which cannot be kept alongside it: a second Close returns a wrapped net.ErrClosed and would log an ERROR on every legitimate expiry"
+    },
+    {
+      "slug": "ws-request-schemas",
+      "file": "pkg/server/server.go",
+      "why": "websocket handler must use the resolver rather than headers. MARKER HAZARD: the marker sits on its own line above the statement (a standalone comment is correct here -- this is not an aligned block), so a resolution can drop the comment and leave working code with no inventory trail. Reverting the code itself fails the build, because resolution feeds beginWebSocketSession; pkg/server/fork_source_test.go pins both halves RULE-4 EXCEPTION: three statements including an `if err != nil` body. Upstream's single getAllowedSchemas call has no error path, so the resolver's cannot be additive; requestSchemas in fork-owned schema_resolver.go already holds everything that could move."
+    },
+    {
+      "slug": "ws-message-query-ctx",
+      "file": "pkg/server/server.go",
+      "why": "message handler needs both the network ctx and the expiry-bounded query ctx"
+    },
+    {
+      "slug": "http-request-schemas",
+      "file": "pkg/server/server.go",
+      "why": "http handler must use the resolver rather than headers. MARKER HAZARD: same standalone-marker shape as ws-request-schemas, and this is the weaker of the two -- reverting the code to getAllowedSchemas compiles, so only the suite (not the compiler) turns it red. pkg/server/fork_source_test.go pins the call count at 2 so reverting one handler and not the other is red on its own terms RULE-4 EXCEPTION: same three-statement shape as ws-request-schemas."
+    },
+    {
+      "slug": "exec-schema-policy-gate",
+      "file": "pkg/server/server.go",
+      "why": "rule 4 exception: a guard returning before upstream's exec path runs. Additive -- a second gate beside upstream's own schema-match condition rather than OR-ed into it, so upstream's line stays context and two independent denial gates are never merged into one expression"
+    },
+    {
+      "slug": "guarded-error-mapping",
+      "file": "pkg/server/errors.go",
+      "why": "byte-cap and deadline errors must not be classified as generic bad_request RULE-4 EXCEPTION: two switch arms with two-line bodies. They must precede upstream's 400/403 arms, and a switch arm cannot delegate its body without a second dispatch."
+    },
+    {
+      "slug": "validatesql-ast-delegate",
+      "file": "pkg/query/validator.go",
+      "why": "ValidateSQL's last statement delegates to the extracted validateParsedAST so the conn-pinned path reuses it. Compiler-protected: deleting the delegation leaves ValidateSQL with no return"
+    },
+    {
+      "slug": "validate-parsed-ast",
+      "file": "pkg/query/validator.go",
+      "why": "AST-validation half extracted from ValidateSQL; duplicating it would drift from upstream silently. Extracted adjacently in this upstream file, which costs 0 deletions (AGENTS.md rule 3)"
+    },
+    {
+      "slug": "validate-sql-on",
+      "file": "pkg/query/validator.go",
+      "why": "new function; parses on a specific driver.Conn so validation joins the transaction already open on that conn. Purely additive -- validator.go carries 0 deletions"
+    },
+    {
+      "slug": "relation-collector",
+      "file": "pkg/query/validator.go",
+      "why": "new Validator collecting BASE_TABLE refs for the live catalog check. Purely additive"
+    },
+    {
+      "slug": "arrow-pool-field",
+      "file": "pkg/query/query.go",
+      "why": "arrowPool pairs each Arrow object with the driver.Conn it was built from, which upstream's connPool cannot; only the guarded coordinator uses it. ADDITIVE since the pool restoration -- upstream's connPool and arrowSemaphore are back verbatim and untouched beside it. SYNC HAZARD: the struct field is compiler-protected, but dropping only the `arrowPool:` row from New's composite literal compiles clean and leaves a nil pool. Measured: go build stays green; TestCatalogCheckAllowsOnlyPhysicalTables and TestRegressionPublicPolicyStack turn red"
+    },
+    {
+      "slug": "guarded-state-field",
+      "file": "pkg/query/query.go",
+      "why": "guard state lives on upstream's own receiver, not a wrapper type, so every dispatch path -- including New's own return value -- reaches it (AGENTS.md rule 4). SYNC HAZARD: dropping only the `transaction: o.Transaction,` row from New's composite literal compiles clean and disarms the entire catalog guard, because every route hook then sees a nil db.transaction and falls through to upstream's unguarded path. Measured: go build stays green; 11 tests turn red, led by guard_shape_fork_test.go's TestConstructorCannotHandOutABypassableDB and pkg/platformauth's regression suite"
+    },
+    {
+      "slug": "guarded-option-validation",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (6 of 6; added beyond the plan's stated five -- see _comment). A three-line guard whose entire purpose is to return before upstream's code runs, structurally identical to the four route preludes and to execCommand's blessed exec-denial gate: 'a four-line guard the compiler protects beats a one-line hook it doesn't'. It must sit here, before sql.OpenDB, so a rejected configuration never leaves an allocated resource behind; the body is validateGuardedOptions in fork-owned guarded.go. gofmt expands `if cond { return }` onto three lines, so no one-statement form exists. SYNC HAZARD: deleting it compiles clean -- validateGuardedOptions is fork-owned and Go permits an uncalled function -- and New would then accept a guarded config with a zero timeout, a zero byte cap, or the result cache still enabled. Measured: go build stays green; options_test.go's TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache turns red"
+    },
+    {
+      "slug": "result-cache-discard",
+      "file": "pkg/query/query.go",
+      "why": "upstream constructs the otter cache unconditionally; this one statement discards it so every `db.cache != nil` guard upstream already has does the work. Split from options.go's result-cache-option because one logical modification spanning two files gets one slug per file (same precedent as exec-denial-authorizer / exec-denial-schema-resolver). SYNC HAZARD -- THE WORST ONE IN THIS PACKAGE: deleting this line compiles clean AND left the whole suite green when measured. It was the only uncaught silent deletion in pkg/query. Its loss re-arms the cache read inside executeGuarded that transaction.go documents as 'unreachable by construction', on a key derived from (format, statement) alone with no tenant or schema dimension. guard_shape_fork_test.go's TestQueryGoRetainsNewConstructorHooks was added to convert that silence into a red test; it is the ONLY check that catches this loss"
+    },
+    {
+      "slug": "exec-denial-guarded",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (1 of 6). Exec gate 3, added as a leading term to upstream's own condition -- it adds no body at all; the `return ErrExecWithValidation` it reaches is upstream's own line. It cannot be a fork-owned wrapper: raw exec is neither validated, catalog-checked nor byte-capped, so the denial must hold for every holder of the *DB, including the object New returns. SYNC HAZARD: dropping the `db.transaction != nil ||` term compiles clean and re-enables raw exec for any deployment that arms the guard without also configuring a function list. Measured: go build stays green; TestGuardedExecIsDeniedThroughInternalDispatch, TestConstructorCannotHandOutABypassableDB and the source guard turn red"
+    },
+    {
+      "slug": "validators-extract",
+      "file": "pkg/query/query.go",
+      "why": "validator construction extracted from validateQuery into newValidators so validateQueryOn builds the identical set; duplicating the list fork-side would silently omit any validator upstream later adds, and a conflict is the correct failure mode for security code. Extracted ADJACENTLY in this upstream file: costs 1 deletion (the signature line), where relocating it to a fork-owned file would break the adjacency git scores as context (AGENTS.md rule 3). Compiler-protected: validate_on.go calls it",
+      "upstream": "candidate"
+    },
+    {
+      "slug": "guarded-route-queryjson",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (2 of 6). Only the route DECISION (`if db.transaction != nil`) stays here; the body is guardedJSON in fork-owned guarded.go. The decision cannot move: state on upstream's own receiver is what makes the guard reachable through every dispatch path, including New's return value and any call *DB makes to itself. A wrapper type here was measured as a cross-tenant fail-open (c2 dry-run evidence, Q1) and is forbidden outright by rule 4. gofmt forbids a one-line form. SYNC HAZARD: deleting the prelude compiles clean -- guardedJSON is fork-owned and Go permits an uncalled method -- and silently routes every JSON query back onto upstream's unvalidated path. Measured by mutation: go build stays green; 8 tests turn red across three layers of guard_shape_fork_test.go plus transaction_test.go"
+    },
+    {
+      "slug": "guarded-route-writejson",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (3 of 6), same reasoning as guarded-route-queryjson; body is writeGuarded in guarded.go. WriteJSON sits outside pkg/server's commandExecutor seam and has no non-test caller, so no interface check would catch its loss. SYNC HAZARD: identical shape -- deleting the prelude compiles clean; guard_shape_fork_test.go is what turns it red"
+    },
+    {
+      "slug": "guarded-route-queryarrow",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (4 of 6), same reasoning as guarded-route-queryjson; body is guardedArrow in guarded.go. This is the entry point pkg/server's Arrow path actually uses. SYNC HAZARD: identical shape -- deleting the prelude compiles clean; guard_shape_fork_test.go is what turns it red"
+    },
+    {
+      "slug": "guarded-route-writearrow",
+      "file": "pkg/query/query.go",
+      "why": "RULE-4 EXCEPTION (5 of 6), same reasoning as guarded-route-queryjson; body is writeGuarded in guarded.go. Also outside the commandExecutor seam. SYNC HAZARD: identical shape -- deleting the prelude compiles clean; guard_shape_fork_test.go is what turns it red"
+    },
+    {
+      "slug": "encoder-extract",
+      "file": "pkg/query/query.go",
+      "why": "one modification, four marker occurrences (the writeJSON/writeArrow call sites and the writeJSONOn/writeArrowOn declarations). Bodies extracted from writeJSON/writeArrow so the guarded coordinator encodes onto the pooledArrowConn.arrow it already holds, without a second pool acquisition. Kept ADJACENT in this upstream file deliberately: relocating the pair to a fork-owned encoder.go was measured at query.go 77/7 -> 47/67, a cost of +60 deletions (AGENTS.md rule 3). Carries two genuine upstream bug fixes: writeJSONOn's rdr.Err() check (a mid-drain reader failure was indistinguishable from a clean finish, committing a truncated JSON array as 200) and writeArrowOn's named return (the deferred Close error was a dead store, letting a truncated Arrow stream commit as 200 instead of 413). Compiler-protected: transaction.go calls both",
+      "upstream": "candidate"
+    },
+    {
+      "slug": "guarded-mode-option",
+      "file": "pkg/query/options.go",
+      "why": "the Transaction field on upstream's Options struct and its WithTransactionalCatalogGuard constructor -- one modification, two occurrences in one file. The type it points at, TransactionOptions, and all its validation live in fork-owned guarded.go, so this file carries only the option surface. Compiler-protected: removing the field breaks query.go and guarded.go"
+    },
+    {
+      "slug": "result-cache-option",
+      "file": "pkg/query/options.go",
+      "why": "the DisableResultCache field and its WithResultCacheDisabled constructor -- one modification, two occurrences in one file. Split from query.go's result-cache-discard because one logical modification spanning two files gets one slug per file, never one slug on two rows (same precedent as exec-denial-authorizer / exec-denial-schema-resolver: merging two halves of a security control into one ledger entry is how a fail-open gets built). Compiler-protected: removing the field breaks guarded.go"
+    },
+    {
+      "slug": "ci-runs-on-every-pr",
+      "file": ".github/workflows/test.yml",
+      "why": "upstream filters pull_request to base main, and this fork develops on stacked branches, so NO CI ran on PRs #1, #2 or #3 -- every 'green' claimed on them was a local macOS run, and the first Linux run of any fork code (PR #4) found a Linux-only failure merged a month earlier. ADDITIVE REJECTED: a glob allowlist of branch prefixes keeps the filter and so restores the identical silent gap for the first branch name nobody predicted, which is the failure being fixed. Costs 2 of this file's 4 deletions."
+    },
+    {
+      "slug": "ci-race-flag",
+      "file": ".github/workflows/test.yml",
+      "why": "AGENTS.md's PR checklist requires `go test -tags=duckdb_arrow -race`, and CI ran without it, so CI enforced a weaker bar than the contract it exists to enforce. ADDITIVE REJECTED: it is a flag inside upstream's run: line, so there is no form that does not edit that line. 1 deletion."
+    },
+    {
+      "slug": "ci-lint-pinned",
+      "file": ".github/workflows/test.yml",
+      "why": "golangci-lint `version: latest` lets a new linter release turn the repo red with no code change; during an upstream sync that is indistinguishable from a merge mistake, which is the one time it is most expensive to misread. Pinned to the version the findings were fixed against. ADDITIVE REJECTED: a value change to an upstream key. 1 deletion."
+    }
+  ],
+  "deletions": {
+    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the four module-rename import lines remaining in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged. The CI carve-out .github/workflows/test.yml is measured here too, as of the ci-runs-on-every-pr / ci-race-flag / ci-lint-pinned entries: it was byte-identical to upstream until then, so rule 1's allowlist existed but had never been exercised.",
+    "pkg/server/server.go": 12,
+    "pkg/query/query.go": 7,
+    "main.go": 6,
+    "pkg/server/example_test.go": 2,
+    "README.md": 1,
+    "go.mod": 1,
+    "pkg/extensions/extensions_test.go": 1,
+    "pkg/query/options.go": 1,
+    "pkg/query/remote_uri.go": 1,
+    "pkg/server/authorization_test.go": 1,
+    "pkg/server/errors.go": 1,
+    "pkg/server/server_test.go": 1,
+    "pkg/query/validator.go": 0,
+    "pkg/server/options.go": 0,
+    ".github/workflows/test.yml": 4
+  }
+}

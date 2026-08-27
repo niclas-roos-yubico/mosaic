@@ -57,7 +57,7 @@ func TestDisableExternalAccessIsGlobalNotPerConnection(t *testing.T) {
 
 	// I4: conn1 and conn2 above were both opened BEFORE the disable, so this test so far only proves the property
 	// for connections that already existed at latch time. It does not yet prove the property latched mode actually
-	// relies on in production: main.go calls DisableExternalAccess once, immediately after query.New, and then
+	// relies on in production: main.go calls DisableExternalAccess once, after the startup extension listing, and then
 	// never touches it again -- every connection arrowPool.acquire later hands out for a guarded query is created
 	// lazily, on that query's first request, strictly AFTER the latch already dropped. If DuckDB ever re-applied a
 	// per-connection default for enable_external_access at connect time (instead of treating it as process-global

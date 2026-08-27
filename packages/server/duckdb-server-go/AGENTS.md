@@ -77,8 +77,24 @@ hook rather than an implementation. Copy that shape.
 
 The lever that makes this achievable in Go: **methods on a type compile from any
 file in the package.** A method on upstream's `handler` or `DB` can live in a
-fork-owned file with no upstream edit at all. Almost any fork body can move; what
-has to stay behind is the call.
+fork-owned file with no upstream edit at all.
+
+**That lever only pays for a whole new function. It does not pay for relocating
+a body that already lives inside an upstream function.** Adjacency in the
+upstream file is what keeps an extraction cheap: git scores an adjacent moved
+body as context, so the extraction costs ~1 deletion (the signature line).
+Move that same body out to a fork-owned file and the lines stop being adjacent
+context — they become deletions. Measured: relocating `writeJSONOn` /
+`writeArrowOn` out of `query.go` into a fork-owned `encoder.go` took
+`query.go` from 77/7 to **47/67**, a cost of +60 deletions, for code that was
+already free where it sat. The only way to get the deletion count *and* the
+new file is to duplicate the body, and a duplicate is a second copy that a fix
+lands on once and not the other.
+
+So: **extract adjacently, in the upstream file. Relocate only whole new
+functions to a fork-owned file.** This applies to component 3's planned moves
+(`requestSchemas`, the WebSocket session lifecycle) as much as it did here —
+check adjacency before moving a body out, not after.
 
 **This applies to tests too.** A fork test living in an upstream `_test.go` file
 is pure cost with no upside: test files are where upstream *appends* most freely,
@@ -108,6 +124,25 @@ So: a four-line guard the compiler protects beats a one-line hook it doesn't.
 Retiring an exception in this list is not worth a fail-open. If you find yourself
 merging two security concerns into one call site to satisfy this rule, that is
 the signal to stop and take the exception instead.
+
+**The same failure mode applies to types, not just hooks: a security guard must
+never be expressed as a wrapper type over an upstream type.** Go has no virtual
+dispatch. An embedded-struct decorator (`GuardedDB{ *DB }`) only intercepts calls
+made *through* the wrapper; any call the upstream type makes to itself — including
+a future upstream refactor that routes one entry point through another — reaches
+the unguarded implementation with no compiler signal, no conflict, no failing
+test. Worse than the dispatch gap: the upstream constructor keeps returning the
+un-wrapped type, so every existing caller already holds an unguarded object
+before the decorator is ever applied. A guard must be **state on the receiver**,
+reached through every dispatch path including the constructor's — not a type
+applied on top after construction. Measured: a decorator over `*query.DB` served
+a cross-tenant row with an empty allowed-schema list, left `MaxResultBytes`
+unenforced, and served a view the live catalog check exists to reject — while
+`pkg/platformauth/regression_test.go` stayed green throughout, because that suite
+exercises the guard through `server.New` rather than through the `*DB` the
+decorator leaves unguarded. The four `if db.transaction != nil` preludes in
+`pkg/query/query.go` are this rule's compliant form: state on the receiver,
+unremovable by any dispatch path, each registered as its own rule-4 exception.
 
 **State the target as a property, not a count.** "No marked site has a body, and
 deletions in this file are at or below N" is the bar. A raw marker count invites
@@ -222,6 +257,13 @@ type handler struct {
 - [ ] `pkg/platformauth/regression_test.go` passes **unmodified**. If a security
       regression test needed editing, you changed behaviour — that is a defect in
       your change, not in the test.
+- [ ] Every upstream file carrying fork markers has a source guard, in the shape
+      `platform_test.go` uses for `main.go`: one test asserting every
+      `// FORK[<slug>]` marker is still present, and a second test asserting a
+      distinctive substring of the load-bearing code the marker sits next to.
+      The marker assertion alone is not enough — some hooks carry their marker
+      on its own line above the statement, so the statement can be deleted
+      while the marker stays and the marker-only check still passes.
 
 Ask yourself the question the inventory exists to force: *could this have been a
 fork-owned file?* If the honest answer is "probably, with more effort", do the
@@ -245,9 +287,24 @@ more effort.
    alongside the conflict count, and treat a synthetic probe (merge against a
    branch that deliberately edits the upstream hunks the fork sits on) as
    supporting evidence — clearly labelled synthetic, because it is.
+
+   **Conflict count is not sufficient, at any churn level.** A merge that
+   *deletes* a fork hook is zero-conflict, compiles, and passes `go build`.
+   Thinning is what makes this possible: it makes hooks textually disjoint
+   from the upstream code they modify, which is exactly what buys the clean
+   merge — and exactly what lets a resolver, human or automatic, drop one
+   blind. Before recording a trial merge as clean and aborting it, run
+   `go build -tags=duckdb_arrow ./...` **and** the full suite
+   (`go test -tags=duckdb_arrow -race ./...`) against it, not just `git merge`'s
+   exit status.
 3. Merge the tag into a sync branch off `fork/main`.
 4. Resolve. Every resolution inside an upstream file still obeys rules 2 and 4 —
-   **a conflict is not a licence to inline.**
+   **a conflict is not a licence to inline.** The same gap applies here as in
+   step 2: a resolution can drop a hook cleanly, with no conflict marker left
+   to review. Run `go build -tags=duckdb_arrow ./...` and the full suite after
+   *every* resolved file, not only once at the end in step 5 — that is what
+   catches a dropped hook at the resolution that dropped it, rather than
+   somewhere in the aggregate of all of them.
 5. Full suite green including `-race`; `regression_test.go` unmodified.
 6. Regenerate `fork-inventory.json`; advance `upstream_base`; delete entries
    upstream has absorbed.

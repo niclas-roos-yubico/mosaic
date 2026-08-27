@@ -19,7 +19,7 @@ five-line edit inside `query.go`.
 
 The number we drive down is the **count of carried modifications**, tracked in
 [`fork-inventory.json`](fork-inventory.json). Not lines, not files — modifications.
-Today it is 44. Every one is a liability with a recurring cost.
+Today it is 39. Every one is a liability with a recurring cost.
 
 ## Rules
 
@@ -227,10 +227,12 @@ fork-owned* — not what the code does, which the code already says.
 marker at end of line, never on its own line above.**
 
 A standalone comment splits gofmt's alignment group and silently reformats the
-untouched lines around it. Four of `pkg/server/server.go`'s 18 current deletions
-are exactly this: adding `schemaResolver` with a comment above it rewrote
-`logger`, `authorizer`, `httpHandler` and `websocketOptions`, none of which
-anyone meant to touch.
+untouched lines around it. This cost 7 deletions in `pkg/server` and nobody
+noticed for months: adding `schemaResolver` with a comment above it rewrote
+`logger`, `authorizer`, `httpHandler` and `websocketOptions` in `server.go`, and
+`cors`, `corsProtection` and `websocket` in `options.go`, none of which anyone
+meant to touch. Moving the two markers to end of line recovered all 7 with no
+logic change — `server.go` 18 → 12, `options.go` 3 → 0.
 
 ```go
 // wrong — reformats its neighbours

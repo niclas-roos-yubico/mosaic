@@ -1,5 +1,5 @@
 {
-  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down. platform#z5x2's main.go component (1 of 3) has landed: every main.go site is now a bodyless hook and the file's deletions fell 35 -> 6 (the irreducible set: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s). Inventory entries for main.go rose 12 -> 13 (16 marker lines over 13 slugs; the entry count is what this file tracks, never the raw marker count -- AGENTS.md rule 4). The extra entry is deliberate -- exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver, because merging two security gates into one call site is how a fail-open gets built (AGENTS.md rule 4). platform#z5x2's pkg/query component (2 of 3) has now landed too: deletions fell query.go 89 -> 7, validator.go 12 -> 0, options.go 1 -> 1 (irreducible module-rename import), and entries fell 28 -> 17. Two conventions were settled there and apply everywhere from now on. FIRST: one logical modification spanning two files gets one slug PER FILE, never one slug on two rows and never a schema change -- result-cache-disable became query.go's result-cache-discard plus options.go's result-cache-option, on the exec-denial-wiring precedent. SECOND: SIX rule-4 exceptions are registered in pkg/query, not the five the plan named. The four route preludes and Exec's gate are the plan's five; guarded-option-validation is a sixth, added deliberately beyond that count because it is structurally the same one-statement-with-a-body as the four preludes, and registering only five would have this file assert a bar the code does not meet. A reviewer who disagrees can drop it to five by editing that one entry. Component 3 (pkg/server) is still outstanding.",
+  "_comment": "Inventory of every modification this fork carries inside upstream-owned files. See AGENTS.md. Seeded 2026-08-26 from fork/main c0123f6d. The count is the number to drive down; it is 39 entries, and the entry count is what this file tracks, never the raw marker count (AGENTS.md rule 4). This branch integrates all three components of platform#z5x2, each developed separately off chore/z5x2-thin-main-go and merged here. Component 1, main.go: every site is a bodyless hook, deletions 35 -> 6 (irreducible: 3 module-rename import paths, the install-once closure body, and the two http.ListenAndServe* calls that name upstream's s); entries rose 12 -> 13 deliberately, because exec-denial-wiring was split into exec-denial-authorizer and exec-denial-schema-resolver -- merging two security gates into one call site is how a fail-open gets built. Component 2, pkg/query: query.go 89 -> 7, validator.go 12 -> 0, entries 28 -> 17. It settled two conventions that apply everywhere from now on -- one logical modification spanning two files gets one slug PER FILE (result-cache-discard in query.go plus result-cache-option in options.go), and SIX rule-4 exceptions are registered rather than the five its plan named, because guarded-option-validation is structurally the same one-statement-with-a-body as the four route preludes and registering five would have this file assert a bar the code does not meet. Components 3+4, pkg/server and README: server.go 18 -> 12, options.go 3 -> 0, README.md 49 -> 1, with 7 of those recovered by moving markers to end-of-line inside aligned blocks rather than by relocating any logic. Deleting each of pkg/server's 9 hooks and rebuilding showed none can be lost silently -- 4 fail the build, 5 turn an existing test red -- which is why pkg/server carries no SYNC HAZARD clause where main.go carries four; pkg/server/fork_source_test.go pins that property so it stays true.",
   "upstream_base": "32986b4e",
   "upstream_base_ref": "v0.31.0",
   "root_allowlist": [
@@ -33,7 +33,10 @@
     "pkg/query/validate_on.go",
     "pkg/query/writer_test.go",
     "pkg/server/schema_resolver.go",
-    "pkg/server/schema_resolver_test.go"
+    "pkg/server/schema_resolver_test.go",
+    "pkg/server/websocket_session.go",
+    "pkg/server/errors_fork_test.go",
+    "pkg/server/fork_source_test.go"
   ],
   "entries": [
     {
@@ -107,16 +110,6 @@
       "why": "resolver field on upstream's private config struct"
     },
     {
-      "slug": "import-sync",
-      "file": "pkg/server/server.go",
-      "why": "sync.Once for single-source websocket close"
-    },
-    {
-      "slug": "import-time",
-      "file": "pkg/server/server.go",
-      "why": "websocket expiry enforcement"
-    },
-    {
       "slug": "handler-schema-resolver-field",
       "file": "pkg/server/server.go",
       "why": "resolver must be reachable from upstream's handler methods"
@@ -127,29 +120,14 @@
       "why": "assignment in upstream's newHandler"
     },
     {
-      "slug": "request-schemas",
+      "slug": "ws-session-bounds",
       "file": "pkg/server/server.go",
-      "why": "resolves JWT-derived schemas without coupling server to platformauth"
+      "why": "session lifecycle (expiry close, query deadline, single-source close) lives in websocket_session.go; the call and its defer must sit inside upstream's handleWebSocket. Replaces upstream's deferred conn.Close, which cannot be kept alongside it: a second Close returns a wrapped net.ErrClosed and would log an ERROR on every legitimate expiry"
     },
     {
       "slug": "ws-request-schemas",
       "file": "pkg/server/server.go",
-      "why": "websocket handler must use the resolver rather than headers"
-    },
-    {
-      "slug": "ws-expiry-close",
-      "file": "pkg/server/server.go",
-      "why": "proactive close at expiry; deadline-context Read force-closes before a close frame can be written"
-    },
-    {
-      "slug": "ws-query-deadline",
-      "file": "pkg/server/server.go",
-      "why": "query context must carry the validated exp so in-flight queries cannot outlive authorization"
-    },
-    {
-      "slug": "ws-close-once",
-      "file": "pkg/server/server.go",
-      "why": "expiry and teardown must not race on which close status the peer sees"
+      "why": "websocket handler must use the resolver rather than headers. MARKER HAZARD: the marker sits on its own line above the statement (a standalone comment is correct here -- this is not an aligned block), so a resolution can drop the comment and leave working code with no inventory trail. Reverting the code itself fails the build, because resolution feeds beginWebSocketSession; pkg/server/fork_source_test.go pins both halves"
     },
     {
       "slug": "ws-message-query-ctx",
@@ -159,12 +137,12 @@
     {
       "slug": "http-request-schemas",
       "file": "pkg/server/server.go",
-      "why": "http handler must use the resolver rather than headers"
+      "why": "http handler must use the resolver rather than headers. MARKER HAZARD: same standalone-marker shape as ws-request-schemas, and this is the weaker of the two -- reverting the code to getAllowedSchemas compiles, so only the suite (not the compiler) turns it red. pkg/server/fork_source_test.go pins the call count at 2 so reverting one handler and not the other is red on its own terms"
     },
     {
       "slug": "exec-schema-policy-gate",
       "file": "pkg/server/server.go",
-      "why": "rule 4 exception: 4-line guard returning before upstream's exec path runs"
+      "why": "rule 4 exception: a guard returning before upstream's exec path runs. Additive -- a second gate beside upstream's own schema-match condition rather than OR-ed into it, so upstream's line stays context and two independent denial gates are never merged into one expression"
     },
     {
       "slug": "guarded-error-mapping",
@@ -260,16 +238,20 @@
     }
   ],
   "deletions": {
-    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e -- <path>`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. pkg/query/validator.go is kept at 0 rather than deleted, so the ratchet keeps asserting that the file stays purely additive. pkg/query/options.go's 1 and pkg/query/remote_uri.go's 1 are each the single module-rename import path (uwdata -> niclas-roos-yubico) and are irreducible while the fork publishes under its own module -- the same class as 3 of main.go's 6. They carry no marker and no entry, matching how main.go's are handled. Four upstream test files also carry deletions against upstream_base and are deliberately absent from this map: pkg/extensions/extensions_test.go 1, pkg/server/authorization_test.go 1, pkg/server/example_test.go 2, pkg/server/server_test.go 1. Test-file deletions are not ratcheted -- pre-existing convention, stated here so the omission reads as deliberate rather than as an oversight.",
-    "README.md": 49,
-    "pkg/server/server.go": 18,
+    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the five module-rename import lines in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged.",
+    "pkg/server/server.go": 12,
     "pkg/query/query.go": 7,
     "main.go": 6,
-    "pkg/server/options.go": 3,
-    "pkg/server/errors.go": 1,
+    "pkg/server/example_test.go": 2,
+    "README.md": 1,
+    "go.mod": 1,
+    "pkg/extensions/extensions_test.go": 1,
     "pkg/query/options.go": 1,
     "pkg/query/remote_uri.go": 1,
-    "go.mod": 1,
-    "pkg/query/validator.go": 0
+    "pkg/server/authorization_test.go": 1,
+    "pkg/server/errors.go": 1,
+    "pkg/server/server_test.go": 1,
+    "pkg/query/validator.go": 0,
+    "pkg/server/options.go": 0
   }
 }

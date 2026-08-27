@@ -13,7 +13,7 @@ import (
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
-// FORK: unit cover for the two platform.go pieces no other test exercises directly. addLogFields is
+// Unit cover for the two platform.go pieces no other test exercises directly. addLogFields is
 // the one that matters: it exists so upstream's config literal stays byte-identical, and a key
 // silently vanishing from it would not fail any other test in this package.
 func testPlatformConfig() *platformConfig {
@@ -110,7 +110,7 @@ func TestQueryOptionsGateOnTheirFlags(t *testing.T) {
 		"the guard's byte cap must come from --max-query-result-bytes")
 }
 
-// FORK: source guard for main.go's hooks.
+// Source guard for main.go's hooks.
 //
 // Thinning bought main.go's clean merge by making every fork edit textually disjoint from the
 // upstream code it modifies. That is exactly what makes a hook deletable: a resolver reading

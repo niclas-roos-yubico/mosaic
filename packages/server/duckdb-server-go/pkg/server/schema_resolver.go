@@ -39,3 +39,27 @@ func WithSchemaResolver(resolver SchemaResolver) Option {
 		return nil
 	})
 }
+
+// requestSchemas resolves the schemas r is permitted to access, and when they
+// expire. It lives here rather than in server.go so the resolver path keeps no
+// body inside an upstream-owned file; only the two call sites stay behind.
+//
+// With no resolver configured this falls back to upstream's header matching, so
+// embedding programs that never call WithSchemaResolver are unaffected. With
+// one configured, an empty schema list is unauthenticated, never "no
+// restriction."
+func (s *handler) requestSchemas(r *http.Request) (SchemaResolution, error) {
+	if s.schemaResolver == nil {
+		return SchemaResolution{AllowedSchemas: getAllowedSchemas(r, s.schemaMatchHeaders)}, nil
+	}
+
+	resolution, err := s.schemaResolver.ResolveSchemas(r)
+	if err != nil {
+		return SchemaResolution{}, &authorizationError{err: err}
+	}
+	if len(resolution.AllowedSchemas) == 0 {
+		return SchemaResolution{}, &authorizationError{err: ErrUnauthenticated}
+	}
+
+	return resolution, nil
+}

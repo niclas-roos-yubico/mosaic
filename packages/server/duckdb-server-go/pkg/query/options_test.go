@@ -2,7 +2,7 @@ package query
 
 import (
 	"testing"
-	"time" // FORK: TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache exercises TransactionOptions timeouts.
+	"time" // TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache exercises TransactionOptions timeouts.
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/assert"
@@ -98,7 +98,7 @@ func TestNewNormalizesCustomFunctionOptions(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// FORK: guards the Task 7 transactional catalog guard's option validation: non-positive limits and
+// Guards the transactional catalog guard's option validation: non-positive limits and
 // enabling the guard without disabling the result cache must all be rejected by New.
 func TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache(t *testing.T) {
 	connector, err := duckdb.NewConnector(":memory:", nil)

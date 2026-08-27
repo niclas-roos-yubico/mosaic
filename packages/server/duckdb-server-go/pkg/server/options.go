@@ -55,11 +55,10 @@ type config struct {
 	logger             *slog.Logger
 	authorizer         Authorizer
 	schemaMatchHeaders []string
-	// FORK: JWT-derived schema/expiry resolution, see schema_resolver.go.
-	schemaResolver SchemaResolver
-	cors           CORSOptions
-	corsProtection *http.CrossOriginProtection
-	websocket      WebSocketOptions
+	schemaResolver     SchemaResolver // FORK[config-schema-resolver]: resolver field on upstream's private config struct.
+	cors               CORSOptions
+	corsProtection     *http.CrossOriginProtection
+	websocket          WebSocketOptions
 }
 
 func defaultConfig() config {

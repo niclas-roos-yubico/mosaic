@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync" // FORK[import-sync]: sync.Once for single-source websocket close.
-	"time" // FORK[import-time]: websocket expiry enforcement.
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -122,28 +120,13 @@ func (s *handler) writeHTTPError(w http.ResponseWriter, err error) {
 	http.Error(w, response.message, response.status)
 }
 
-// FORK: resolve JWT-derived schemas and expiry without coupling server to platformauth.
-func (s *handler) requestSchemas(r *http.Request) (SchemaResolution, error) {
-	if s.schemaResolver != nil {
-		resolution, err := s.schemaResolver.ResolveSchemas(r)
-		if err != nil {
-			return SchemaResolution{}, &authorizationError{err: err}
-		}
-		if len(resolution.AllowedSchemas) == 0 {
-			return SchemaResolution{}, &authorizationError{err: ErrUnauthenticated}
-		}
-		return resolution, nil
-	}
-	return SchemaResolution{AllowedSchemas: getAllowedSchemas(r, s.schemaMatchHeaders)}, nil
-}
-
 func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !webSocketOriginAllowed(r, s.websocketOptions) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
 	}
 
-	// FORK: resolve schemas/expiry via requestSchemas instead of reading headers directly.
+	// FORK[ws-request-schemas]: handler must use the resolver rather than headers.
 	resolution, err := s.requestSchemas(r)
 	if err != nil {
 		s.writeHTTPError(w, err)
@@ -172,52 +155,16 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FORK: bound the session to the resolved expiry (validated JWT exp), closing with 1008.
-	//
-	// This proactively closes at expiry rather than deriving a deadline context
-	// for wsjson.Read: github.com/coder/websocket's read-timeout handling
-	// force-closes the raw connection the instant a deadline context passed to
-	// Read is done (see (*Conn).setupReadTimeout), before a subsequent graceful
-	// Close(status, reason) call can write a close frame. Closing directly at
-	// expiry avoids that race and deterministically delivers the
-	// StatusPolicyViolation/"session expired" close frame to the peer.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// FORK: unlike the network ctx above, the query path is not subject to the
-	// websocket read/write race, so it keeps a deadline bound to the resolved
-	// expiry: an in-flight query must not keep running under pre-expiry
-	// authorization past the session's validated exp.
-	queryCtx := ctx
-	if !resolution.ExpiresAt.IsZero() {
-		var queryCancel context.CancelFunc
-		queryCtx, queryCancel = context.WithDeadline(ctx, resolution.ExpiresAt)
-		defer queryCancel()
-	}
-
-	// FORK: single-source the close through sync.Once so an expiry and an
-	// ordinary teardown can never race on which status/reason the peer sees,
-	// and so the losing side never performs (or logs) a redundant second
-	// Close call. See close.go: a second Close is a no-op that returns a
-	// wrapped net.ErrClosed, which would otherwise log an ERROR on every
-	// single legitimate expiry.
-	var closeOnce sync.Once
-	closeConn := func(status websocket.StatusCode, reason string) {
-		closeOnce.Do(func() {
-			if closeErr := conn.Close(status, reason); closeErr != nil {
-				s.logger.Error("server: error closing websocket", "error", closeErr)
-			}
-		})
-	}
-
-	if !resolution.ExpiresAt.IsZero() {
-		expiryTimer := time.AfterFunc(time.Until(resolution.ExpiresAt), func() {
-			closeConn(websocket.StatusPolicyViolation, "session expired")
-		})
-		defer expiryTimer.Stop()
-	}
-
-	defer closeConn(websocket.StatusInternalError, "connection closed")
+	// FORK[ws-session-bounds]: the session lifecycle -- expiry close, query
+	// deadline, single-source close -- lives in websocket_session.go; only the
+	// call and its defer can stay behind. It replaces upstream's deferred
+	// conn.Close, which cannot be kept: a second Close returns a wrapped
+	// net.ErrClosed, so leaving it would log an ERROR on every expiry.
+	queryCtx, endSession := s.beginWebSocketSession(ctx, conn, resolution)
+	defer endSession()
 
 	for {
 		err = s.handleWebSocketMessage(ctx, queryCtx, conn, allowedSchemas, authorize)
@@ -229,9 +176,12 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 // A returned error closes the connection. Command errors are written to the
-// client and return nil so the session survives them. ctx bounds the
-// websocket read/write; queryCtx additionally carries the resolved session
-// expiry as a deadline and bounds command execution.
+// client and return nil so the session survives them.
+//
+// FORK[ws-message-query-ctx]: ctx bounds the websocket read/write; queryCtx
+// additionally carries the resolved session expiry as a deadline and bounds
+// command execution. The parameter is explicit rather than smuggled through a
+// context value so no call site can silently skip the expiry bound.
 func (s *handler) handleWebSocketMessage(ctx, queryCtx context.Context, conn *websocket.Conn, allowedSchemas []string, authorize CommandAuthorizer) error {
 	var params queryParams
 	err := wsjson.Read(ctx, conn, &params)
@@ -239,8 +189,8 @@ func (s *handler) handleWebSocketMessage(ctx, queryCtx context.Context, conn *we
 		return fmt.Errorf("failed to read websocket message: %w", err)
 	}
 
-	// FORK: bound query execution (and its authorization) by the resolved
-	// session expiry via queryCtx, not the plain network ctx.
+	// FORK[ws-message-query-ctx]: bound query execution (and its authorization)
+	// by the resolved session expiry via queryCtx, not the plain network ctx.
 	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize)
 	if err != nil {
 		errResponse := s.classifyAndLogError(err)
@@ -267,7 +217,7 @@ func (s *handler) handleWebSocketMessage(ctx, queryCtx context.Context, conn *we
 }
 
 func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// FORK: resolve schemas/expiry via requestSchemas instead of reading headers directly.
+	// FORK[http-request-schemas]: handler must use the resolver rather than headers.
 	resolution, err := s.requestSchemas(r)
 	if err != nil {
 		s.writeHTTPError(w, err)
@@ -358,8 +308,15 @@ func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSc
 
 	switch command.Type() {
 	case CommandExec:
-		// FORK: either schema policy makes unrestricted exec unsafe.
-		if len(s.schemaMatchHeaders) > 0 || s.schemaResolver != nil {
+		// FORK[exec-schema-policy-gate]: rule 4 exception -- a guard that returns
+		// before upstream's exec path runs. Deliberately a second gate beside
+		// upstream's own condition rather than OR-ed into it: merging two
+		// independent denial gates into one expression is how a fail-open gets
+		// built, and it keeps upstream's line as context.
+		if s.schemaResolver != nil {
+			return commandResponse{}, query.ErrExecWithValidation
+		}
+		if len(s.schemaMatchHeaders) > 0 {
 			return commandResponse{}, query.ErrExecWithValidation
 		}
 		err = s.db.Exec(ctx, command.SQL())

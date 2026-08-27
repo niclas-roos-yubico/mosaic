@@ -54,7 +54,7 @@ func classifyError(err error) errorResponse {
 		paramsError  queryParamsError
 	)
 	switch {
-	// FORK: Task 7 guarded-execution coordinator errors. Checked before the 400/403 cases below so a byte-cap or
+	// FORK[guarded-error-mapping]: guarded-execution coordinator errors. Checked before the 400/403 cases below so a byte-cap or
 	// deadline hit is never miscategorized as a generic bad_request.
 	case errors.Is(err, query.ErrResultTooLarge):
 		response.status = http.StatusRequestEntityTooLarge

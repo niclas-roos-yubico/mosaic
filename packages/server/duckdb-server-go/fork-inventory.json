@@ -33,7 +33,9 @@
     "pkg/query/transaction_test.go",
     "pkg/query/writer_test.go",
     "pkg/server/schema_resolver.go",
-    "pkg/server/schema_resolver_test.go"
+    "pkg/server/schema_resolver_test.go",
+    "pkg/server/websocket_session.go",
+    "pkg/server/errors_fork_test.go"
   ],
 
   "entries": [
@@ -53,18 +55,13 @@
 
     { "slug": "config-schema-resolver",      "file": "pkg/server/options.go", "why": "resolver field on upstream's private config struct" },
 
-    { "slug": "import-sync",                 "file": "pkg/server/server.go", "why": "sync.Once for single-source websocket close" },
-    { "slug": "import-time",                 "file": "pkg/server/server.go", "why": "websocket expiry enforcement" },
     { "slug": "handler-schema-resolver-field",  "file": "pkg/server/server.go", "why": "resolver must be reachable from upstream's handler methods" },
     { "slug": "handler-schema-resolver-assign", "file": "pkg/server/server.go", "why": "assignment in upstream's newHandler" },
-    { "slug": "request-schemas",             "file": "pkg/server/server.go", "why": "resolves JWT-derived schemas without coupling server to platformauth" },
+    { "slug": "ws-session-bounds",           "file": "pkg/server/server.go", "why": "session lifecycle (expiry close, query deadline, single-source close) lives in websocket_session.go; the call and its defer must sit inside upstream's handleWebSocket. Replaces upstream's deferred conn.Close, which cannot be kept alongside it: a second Close returns a wrapped net.ErrClosed and would log an ERROR on every legitimate expiry" },
     { "slug": "ws-request-schemas",          "file": "pkg/server/server.go", "why": "websocket handler must use the resolver rather than headers" },
-    { "slug": "ws-expiry-close",             "file": "pkg/server/server.go", "why": "proactive close at expiry; deadline-context Read force-closes before a close frame can be written" },
-    { "slug": "ws-query-deadline",           "file": "pkg/server/server.go", "why": "query context must carry the validated exp so in-flight queries cannot outlive authorization" },
-    { "slug": "ws-close-once",               "file": "pkg/server/server.go", "why": "expiry and teardown must not race on which close status the peer sees" },
     { "slug": "ws-message-query-ctx",        "file": "pkg/server/server.go", "why": "message handler needs both the network ctx and the expiry-bounded query ctx" },
     { "slug": "http-request-schemas",        "file": "pkg/server/server.go", "why": "http handler must use the resolver rather than headers" },
-    { "slug": "exec-schema-policy-gate",     "file": "pkg/server/server.go", "why": "rule 4 exception: 4-line guard returning before upstream's exec path runs" },
+    { "slug": "exec-schema-policy-gate",     "file": "pkg/server/server.go", "why": "rule 4 exception: a guard returning before upstream's exec path runs. Additive -- a second gate beside upstream's own schema-match condition rather than OR-ed into it, so upstream's line stays context and two independent denial gates are never merged into one expression" },
 
     { "slug": "guarded-error-mapping",       "file": "pkg/server/errors.go", "why": "byte-cap and deadline errors must not be classified as generic bad_request" },
 

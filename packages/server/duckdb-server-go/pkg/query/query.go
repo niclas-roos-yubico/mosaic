@@ -215,8 +215,8 @@ func (db *DB) Close() {
 }
 
 func (db *DB) Exec(ctx context.Context, query string) error {
-	// FORK: db.transaction != nil added as a third, independent exec gate (Task 7): guarded mode must never allow
-	// raw exec to bypass the transactional catalog guard, even if a future binary omits the function options.
+	// FORK[exec-denial-guarded]: exec gate 3. It has to be a term in upstream's own condition because the denial must
+	// hold for every holder of the *DB, including the one New returns; a fork-owned wrapper would not bind it.
 	if db.transaction != nil || len(db.functionBlocklist) > 0 || db.functionAllowlistConfigured || db.rejectRemoteURILiterals {
 		return ErrExecWithValidation
 	}
@@ -229,9 +229,8 @@ func (db *DB) Exec(ctx context.Context, query string) error {
 	return nil
 }
 
-// FORK: validator construction extracted out of validateQuery into newValidators, so validateQueryOn can build the
-// same validator set. validateQuery itself is unchanged in behavior and must keep working exactly as before: Task 7
-// calls it, unmodified, through the *sql.DB path for cheap pre-Arrow load-shedding.
+// FORK[validators-extract]: validator construction extracted so validateQueryOn builds the identical set;
+// duplicating the list fork-side would silently omit any validator upstream later adds. Extracted adjacently.
 func (db *DB) newValidators(allowedSchemas []string) []Validator {
 	validators := make([]Validator, 0, 4)
 	if len(allowedSchemas) > 0 {
@@ -264,12 +263,10 @@ func (db *DB) validateQuery(ctx context.Context, query string, allowedSchemas []
 }
 
 func (db *DB) QueryJSON(ctx context.Context, query string, allowedSchemas []string, useCache bool) (json.RawMessage, bool, error) {
-	// FORK: Task 7 guarded-execution coordinator. When enabled, this bypasses db.validateQuery/db.cache/db.writeJSON
-	// entirely: executeGuarded performs its own validation, catalog check, execution, and (structurally disabled)
-	// cache lookup inside one pinned transaction. Upstream behavior below is unchanged when db.transaction is nil.
+	// FORK[guarded-route-queryjson]: the route decision must stay on upstream's own receiver -- state every dispatch
+	// path reaches, including a call *DB makes to itself. Body in guarded.go; upstream's path below is untouched.
 	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseJSON)
-		return json.RawMessage(data), false, err
+		return db.guardedJSON(ctx, query, allowedSchemas)
 	}
 
 	err := db.validateQuery(ctx, query, allowedSchemas)
@@ -302,18 +299,9 @@ func (db *DB) QueryJSON(ctx context.Context, query string, allowedSchemas []stri
 }
 
 func (db *DB) WriteJSON(ctx context.Context, query string, allowedSchemas []string, w io.Writer) error {
-	// FORK: Task 7 guarded-execution coordinator. executeGuarded fully materializes and commits before this
-	// performs its single w.Write(data): the client must never observe bytes from a transaction that later rolled
-	// back. Upstream behavior below is unchanged when db.transaction is nil.
+	// FORK[guarded-route-writejson]: route decision on upstream's receiver, body in guarded.go. Mirrors QueryJSON.
 	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseJSON)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(data); err != nil {
-			return fmt.Errorf("query: failed to write response: %w", err)
-		}
-		return nil
+		return db.writeGuarded(ctx, query, allowedSchemas, responseJSON, w)
 	}
 
 	err := db.validateQuery(ctx, query, allowedSchemas)
@@ -336,8 +324,13 @@ func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
 	return db.writeJSONOn(ctx, arrow, query, w) // FORK[encoder-extract]: body extracted so the guarded coordinator reuses one encoder
 }
 
-// FORK: new function, extracted from writeJSON's body (Task 7) so the guarded coordinator in transaction.go can
-// invoke it directly on the pooledArrowConn.arrow it already holds, without a second pool acquisition.
+// FORK[encoder-extract]: extracted from writeJSON's body so the guarded coordinator in transaction.go encodes onto
+// the pooledArrowConn.arrow it already holds, without a second pool acquisition. Kept adjacent in this upstream file
+// deliberately: relocating it to a fork-owned file costs +60 deletions (AGENTS.md rule 3).
+//
+// FORK fix wave C1: the rdr.Err() check below is load-bearing. The vendored driver's recordReader.Next() returns
+// false both on a clean end of results and on a mid-drain cancel or timeout, setting Err() only in the latter, so
+// without it "]" would close a valid-looking but truncated JSON array that executeGuarded commits and returns.
 func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) error {
 	rdr, err := arrowConn.QueryContext(ctx, statement)
 	if err != nil {
@@ -372,12 +365,6 @@ func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statemen
 		}
 	}
 
-	// FORK: fix wave C1. The vendored driver's recordReader.Next() (duckdb-go/v2's arrow.go) returns false both on
-	// a clean end of results and when guardCtx is canceled or times out mid-drain -- setting Err() only in the
-	// latter case -- so without this check a mid-drain failure was indistinguishable from a normal finish: the
-	// loop would simply stop, "]" would close out a syntactically valid but truncated JSON array, and
-	// executeGuarded would go on to commit and return it to the caller as if it were complete. Mirrors the
-	// rdr.Err() check writeArrowOn already has below.
 	if rdr.Err() != nil {
 		return fmt.Errorf("query: error during record iteration: %w", rdr.Err())
 	}
@@ -391,11 +378,9 @@ func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statemen
 }
 
 func (db *DB) QueryArrow(ctx context.Context, query string, allowedSchemas []string, useCache bool) ([]byte, bool, error) {
-	// FORK: Task 7 guarded-execution coordinator, mirroring QueryJSON above. Upstream behavior below is unchanged
-	// when db.transaction is nil.
+	// FORK[guarded-route-queryarrow]: route decision on upstream's receiver, body in guarded.go. Mirrors QueryJSON.
 	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseArrow)
-		return data, false, err
+		return db.guardedArrow(ctx, query, allowedSchemas)
 	}
 
 	err := db.validateQuery(ctx, query, allowedSchemas)
@@ -428,17 +413,9 @@ func (db *DB) QueryArrow(ctx context.Context, query string, allowedSchemas []str
 }
 
 func (db *DB) WriteArrow(ctx context.Context, query string, allowedSchemas []string, w io.Writer) error {
-	// FORK: Task 7 guarded-execution coordinator, mirroring WriteJSON above: executeGuarded commits before this
-	// performs its single w.Write(data). Upstream behavior below is unchanged when db.transaction is nil.
+	// FORK[guarded-route-writearrow]: route decision on upstream's receiver, body in guarded.go. Mirrors WriteJSON.
 	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, query, allowedSchemas, responseArrow)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(data); err != nil {
-			return fmt.Errorf("query: failed to write response: %w", err)
-		}
-		return nil
+		return db.writeGuarded(ctx, query, allowedSchemas, responseArrow, w)
 	}
 
 	err := db.validateQuery(ctx, query, allowedSchemas)
@@ -461,14 +438,13 @@ func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
 	return db.writeArrowOn(ctx, arrow, query, w) // FORK[encoder-extract]: body extracted so the guarded coordinator reuses one encoder
 }
 
-// FORK: new function, extracted from writeArrow's body (Task 7) so the guarded coordinator in transaction.go can
-// invoke it directly on the pooledArrowConn.arrow it already holds, without a second pool acquisition.
-// FORK: fix wave I2. The return value is now named (retErr) because the deferred Close below can fail -- e.g.
-// writing the Arrow end-of-stream marker crosses the transaction's MaxResultBytes limit -- and with the previous
-// unnamed return, assigning to the loop's `err` variable inside the deferred closure was a dead store: it could
-// never change what the function actually returned. That let a truncated Arrow IPC stream commit and reach the
-// client as 200 instead of 413. Only overwrite retErr when it is still nil, so an earlier, already-reported error
-// from the write loop is never masked by a subsequent Close failure.
+// FORK[encoder-extract]: extracted from writeArrow's body for the same reason as writeJSONOn above, and kept
+// adjacent here for the same rule-3 adjacency cost.
+//
+// FORK fix wave I2: the return value is named because the deferred Close below can fail -- writing the Arrow
+// end-of-stream marker can cross the transaction's MaxResultBytes limit -- and with an unnamed return, assigning to
+// the loop's `err` inside the deferred closure was a dead store, letting a truncated Arrow IPC stream commit and
+// reach the client as 200 instead of 413. retErr is overwritten only while nil, so an earlier error is never masked.
 func (db *DB) writeArrowOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) (retErr error) {
 	rdr, err := arrowConn.QueryContext(ctx, statement)
 	if err != nil {

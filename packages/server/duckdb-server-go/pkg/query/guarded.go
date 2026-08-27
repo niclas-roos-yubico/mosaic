@@ -1,8 +1,8 @@
 package query
 
-// FORK-OWNED FILE. Config and validation for the guarded-execution coordinator: TransactionOptions is the
-// guarded-mode option type, and validateGuardedOptions/discardCacheIfDisabled are the bodies behind query.go's
-// New() one-statement hooks.
+// FORK-OWNED FILE. Config, validation and route bodies for the guarded-execution coordinator: TransactionOptions is
+// the guarded-mode option type; validateGuardedOptions/discardCacheIfDisabled are the bodies behind query.go's New()
+// one-statement hooks; guardedJSON/guardedArrow/writeGuarded are the bodies behind query.go's four route hooks.
 //
 // The guard itself is state on *DB's own receiver (see query.go's `db.transaction != nil` preludes and
 // transaction.go's executeGuarded) -- it is never expressed as a wrapper type constructed on top of *DB. A
@@ -12,7 +12,11 @@ package query
 // unguarded implementation with no compiler signal, no conflict, and no failing test. See AGENTS.md rule 4.
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"time"
 
 	"github.com/maypok86/otter/v2"
@@ -26,6 +30,37 @@ type TransactionOptions struct {
 
 	// MaxResultBytes caps the number of encoded response bytes buffered before being released to the client.
 	MaxResultBytes int64
+}
+
+// guardedJSON, guardedArrow and writeGuarded are the bodies behind query.go's four route hooks. They are methods on
+// upstream's own *DB, which AGENTS.md rule 3's lever allows ("methods on a type compile from any file in the
+// package"), so nothing but the route DECISION stays in query.go. The decision itself cannot move here: it is the
+// `db.transaction != nil` test on the receiver, and that is precisely what makes the guard reachable through every
+// dispatch path -- see the rule-4 note above.
+func (db *DB) guardedJSON(ctx context.Context, statement string, allowedSchemas []string) (json.RawMessage, bool, error) {
+	data, err := db.executeGuarded(ctx, statement, allowedSchemas, responseJSON)
+	// Always a cache miss: guarded mode requires DisableResultCache, so db.cache is nil and no guarded response is
+	// ever served from, or written to, the result cache.
+	return json.RawMessage(data), false, err
+}
+
+func (db *DB) guardedArrow(ctx context.Context, statement string, allowedSchemas []string) ([]byte, bool, error) {
+	data, err := db.executeGuarded(ctx, statement, allowedSchemas, responseArrow)
+	return data, false, err
+}
+
+// writeGuarded is the streaming-entry-point body. executeGuarded fully materializes into a byte-capped buffer and
+// commits before returning, so the single w.Write below is the first byte the client can observe: nothing from a
+// transaction that later rolled back ever reaches the wire.
+func (db *DB) writeGuarded(ctx context.Context, statement string, allowedSchemas []string, format responseFormat, w io.Writer) error {
+	data, err := db.executeGuarded(ctx, statement, allowedSchemas, format)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return fmt.Errorf("query: failed to write response: %w", err)
+	}
+	return nil
 }
 
 // validateGuardedOptions is the body behind query.go's New() one-statement guarded-option hook. It runs before any

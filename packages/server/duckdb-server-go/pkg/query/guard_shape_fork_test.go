@@ -336,7 +336,7 @@ var queryGoConstructorSites = []struct {
 	},
 	{
 		slug: "guarded-state-field",
-		code: "transaction:",
+		code: "transaction: o.Transaction",
 		lost: "the guard state itself; every route prelude then sees a nil db.transaction and falls through to " +
 			"upstream's unvalidated path, with the catalog guard silently disarmed",
 	},
@@ -383,11 +383,13 @@ func TestForkInventoryAndPkgQueryAgreeOnSlugs(t *testing.T) {
 
 	marker := regexp.MustCompile(`// FORK\[([a-z0-9-]+)\]`)
 	slugOwner := map[string]string{}
+	visited := map[string]bool{}
 
 	for _, source := range sources {
 		if strings.HasSuffix(source, "_test.go") {
 			continue
 		}
+		visited["pkg/query/"+source] = true
 		payload, err := os.ReadFile(source)
 		require.NoError(t, err)
 		body := string(payload)
@@ -426,6 +428,19 @@ func TestForkInventoryAndPkgQueryAgreeOnSlugs(t *testing.T) {
 		require.ElementsMatch(t, inventorySlugs, sourceSlugs,
 			"%s's FORK slugs and its fork-inventory.json rows disagree; every marker needs a row and every "+
 				"row needs a marker (AGENTS.md PR checklist)", source)
+	}
+
+	// The loop above only visits non-test sources that exist on disk, so a row naming a deleted path -- or a
+	// _test.go path, which the marker audit deliberately excludes -- would never be reached by the direction-B
+	// check and would sit in the inventory unnoticed. Close that here.
+	for _, entry := range inventory.Entries {
+		if !strings.HasPrefix(entry.File, "pkg/query/") {
+			continue
+		}
+		require.True(t, visited[entry.File],
+			"fork-inventory.json row %q names %q, which is not a non-test source file in pkg/query; either the "+
+				"file was deleted and the row should go, or the row points at a _test.go path the marker audit "+
+				"does not cover", entry.Slug, entry.File)
 	}
 
 	// Keep this file's own source-guard tables from drifting out of date silently.

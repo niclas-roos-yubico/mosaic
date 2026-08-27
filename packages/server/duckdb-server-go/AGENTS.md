@@ -59,15 +59,17 @@ in the fork to merge. Those 89 *deleted* lines, not the 167 added ones, were the
 cost. A purely additive diff merges cleanly almost regardless of size; a deleted
 hunk conflicts with any upstream change that touches it.
 
-That thinning has since landed (`platform#z5x2` component 2): `query.go` is now
-**77/7** and `pkg/query/validator.go` **74/0**. The lesson stands — the deletion
-count is the number that matters — but read the current figures out of
-`fork-inventory.json`'s `deletions` map rather than from this paragraph.
+That thinning has since landed (`platform#z5x2` component 2). The lesson stands
+— the deletion count is the number that matters — but this paragraph carries no
+current figures on purpose: read them out of `fork-inventory.json`'s `deletions`
+map, which is the only place they are kept up to date.
 
 Non-additive changes are permitted where genuinely correct. They need an
 inventory entry saying why the additive form was rejected. Per-file deletion
-counts are ratcheted in CI: they may fall freely, and may rise only alongside a
-new or amended entry.
+counts in `fork-inventory.json` are a ratchet: they may fall freely, and may
+rise only alongside a new or amended entry. **Nothing enforces that ratchet
+automatically yet** — it is reviewer-enforced, tracked as kata `platform#cbjc`.
+Do not read the ratchet as a check that will catch you.
 
 ### 3. New logic goes in a new file
 

@@ -328,7 +328,7 @@ func (db *DB) writeJSON(ctx context.Context, query string, w io.Writer) error {
 // the pooledArrowConn.arrow it already holds, without a second pool acquisition. Kept adjacent in this upstream file
 // deliberately: relocating it to a fork-owned file costs +60 deletions (AGENTS.md rule 3).
 //
-// FORK fix wave C1: the rdr.Err() check below is load-bearing. The vendored driver's recordReader.Next() returns
+// FORK[encoder-extract] fix wave C1: the rdr.Err() check below is load-bearing. The vendored driver's recordReader.Next() returns
 // false both on a clean end of results and on a mid-drain cancel or timeout, setting Err() only in the latter, so
 // without it "]" would close a valid-looking but truncated JSON array that executeGuarded commits and returns.
 func (db *DB) writeJSONOn(ctx context.Context, arrowConn *duckdb.Arrow, statement string, w io.Writer) error {
@@ -441,7 +441,7 @@ func (db *DB) writeArrow(ctx context.Context, query string, w io.Writer) error {
 // FORK[encoder-extract]: extracted from writeArrow's body for the same reason as writeJSONOn above, and kept
 // adjacent here for the same rule-3 adjacency cost.
 //
-// FORK fix wave I2: the return value is named because the deferred Close below can fail -- writing the Arrow
+// FORK[encoder-extract] fix wave I2: the return value is named because the deferred Close below can fail -- writing the Arrow
 // end-of-stream marker can cross the transaction's MaxResultBytes limit -- and with an unnamed return, assigning to
 // the loop's `err` inside the deferred closure was a dead store, letting a truncated Arrow IPC stream commit and
 // reach the client as 200 instead of 413. retErr is overwritten only while nil, so an earlier error is never masked.

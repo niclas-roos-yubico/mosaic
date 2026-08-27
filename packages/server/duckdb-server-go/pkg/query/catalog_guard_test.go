@@ -15,7 +15,7 @@ func TestCatalogCheckAllowsOnlyPhysicalTables(t *testing.T) {
 	defer db.arrowPool.release(pc)
 	tx, err := pc.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	require.NoError(t, checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "metrics"}}))
 }
 
@@ -32,7 +32,7 @@ func TestCatalogCheckRejectsViewAndUserMacro(t *testing.T) {
 			defer db.arrowPool.release(pc)
 			tx, err := pc.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 			require.NoError(t, err)
-			defer tx.Rollback()
+			defer func() { _ = tx.Rollback() }()
 			err = checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "target"}})
 			require.ErrorIs(t, err, ErrAccessDenied)
 		})
@@ -64,7 +64,7 @@ func TestCatalogTransactionPinsTableBeforeViewReplacement(t *testing.T) {
 
 	writer, err := connector.Connect(t.Context())
 	require.NoError(t, err)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	wtx, err := writer.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
 	require.NoError(t, execOn(t.Context(), writer, `DROP TABLE tenant_a.target; CREATE VIEW tenant_a.target AS SELECT 'canary' AS v`))
@@ -86,7 +86,7 @@ func TestCatalogTransactionPinsTableBeforeViewReplacement(t *testing.T) {
 	defer db.arrowPool.release(next)
 	nextTx, err := next.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
-	defer nextTx.Rollback()
+	defer func() { _ = nextTx.Rollback() }()
 	nextRefs, err := db.validateQueryOn(t.Context(), next.conn, `SELECT * FROM tenant_a.target`, []string{"tenant_a"})
 	require.NoError(t, err)
 	require.ErrorIs(t, checkCatalogOn(t.Context(), next.conn, nextRefs), ErrAccessDenied)
@@ -118,7 +118,7 @@ func TestCatalogTransactionPinsMacroFreeSnapshot(t *testing.T) {
 
 	writer, err := connector.Connect(t.Context())
 	require.NoError(t, err)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	wtx, err := writer.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
 	require.NoError(t, execOn(t.Context(), writer, `CREATE MACRO tenant_a.range(n) AS TABLE SELECT 'canary' AS v`))
@@ -137,7 +137,7 @@ func TestCatalogTransactionPinsMacroFreeSnapshot(t *testing.T) {
 	defer db.arrowPool.release(next)
 	nextTx, err := next.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
-	defer nextTx.Rollback()
+	defer func() { _ = nextTx.Rollback() }()
 	nextRefs, err := db.validateQueryOn(t.Context(), next.conn, statement, []string{"tenant_a"})
 	require.NoError(t, err)
 	require.ErrorIs(t, checkCatalogOn(t.Context(), next.conn, nextRefs), ErrAccessDenied)

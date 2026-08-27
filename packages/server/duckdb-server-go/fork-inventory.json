@@ -236,10 +236,25 @@
       "slug": "result-cache-option",
       "file": "pkg/query/options.go",
       "why": "the DisableResultCache field and its WithResultCacheDisabled constructor -- one modification, two occurrences in one file. Split from query.go's result-cache-discard because one logical modification spanning two files gets one slug per file, never one slug on two rows (same precedent as exec-denial-authorizer / exec-denial-schema-resolver: merging two halves of a security control into one ledger entry is how a fail-open gets built). Compiler-protected: removing the field breaks guarded.go"
+    },
+    {
+      "slug": "ci-runs-on-every-pr",
+      "file": ".github/workflows/test.yml",
+      "why": "upstream filters pull_request to base main, and this fork develops on stacked branches, so NO CI ran on PRs #1, #2 or #3 -- every 'green' claimed on them was a local macOS run, and the first Linux run of any fork code (PR #4) found a Linux-only failure merged a month earlier. ADDITIVE REJECTED: a glob allowlist of branch prefixes keeps the filter and so restores the identical silent gap for the first branch name nobody predicted, which is the failure being fixed. Costs 2 of this file's 4 deletions."
+    },
+    {
+      "slug": "ci-race-flag",
+      "file": ".github/workflows/test.yml",
+      "why": "AGENTS.md's PR checklist requires `go test -tags=duckdb_arrow -race`, and CI ran without it, so CI enforced a weaker bar than the contract it exists to enforce. ADDITIVE REJECTED: it is a flag inside upstream's run: line, so there is no form that does not edit that line. 1 deletion."
+    },
+    {
+      "slug": "ci-lint-pinned",
+      "file": ".github/workflows/test.yml",
+      "why": "golangci-lint `version: latest` lets a new linter release turn the repo red with no code change; during an upstream sync that is indistinguishable from a merge mistake, which is the one time it is most expensive to misread. Pinned to the version the findings were fixed against. ADDITIVE REJECTED: a value change to an upstream key. 1 deletion."
     }
   ],
   "deletions": {
-    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the four module-rename import lines remaining in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged.",
+    "_comment": "Upstream lines removed, per file, measured against upstream_base with `git diff --numstat 32986b4e`. Ratcheted: may fall freely, may rise only with a new or amended entry explaining why additive did not work. Every file the fork deletes a line from is listed, including the four module-rename import lines remaining in test files -- those carry no inventory entry because the rename is irreducible and package-wide, not a per-site design choice. NOTE: the pkg/query branch deliberately EXCLUDED those four test files, calling their omission a pre-existing convention; this merge overrides that, on the grounds that a ratchet which omits files where deletions exist can rise unnoticed, which is the one thing a ratchet is for. Reverting to the other convention is four lines. A file at 0 keeps its row so a regression is red. Remeasured on this integration branch, all three components merged. The CI carve-out .github/workflows/test.yml is measured here too, as of the ci-runs-on-every-pr / ci-race-flag / ci-lint-pinned entries: it was byte-identical to upstream until then, so rule 1's allowlist existed but had never been exercised.",
     "pkg/server/server.go": 12,
     "pkg/query/query.go": 7,
     "main.go": 6,
@@ -253,6 +268,7 @@
     "pkg/server/errors.go": 1,
     "pkg/server/server_test.go": 1,
     "pkg/query/validator.go": 0,
-    "pkg/server/options.go": 0
+    "pkg/server/options.go": 0,
+    ".github/workflows/test.yml": 4
   }
 }

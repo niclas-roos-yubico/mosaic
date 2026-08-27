@@ -222,7 +222,10 @@ func (v *JWTValidator) fetchJWKS(ctx context.Context, ifNoneMatch string) (jwk.S
 	if err != nil {
 		return nil, "", fmt.Errorf("jwt: JWKS fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	// Discarded deliberately: this is a response body being released on the read path, so a Close
+	// error reports only that the connection could not be reused, never that the JWKS we already
+	// parsed was wrong. Matches the explicit discard on the drain below.
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 304 {
 		return nil, ifNoneMatch, nil // not modified; caller uses cached set

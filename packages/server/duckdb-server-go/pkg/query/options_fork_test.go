@@ -20,7 +20,7 @@ import (
 func TestTransactionalGuardRequiresPositiveLimitsAndDisabledCache(t *testing.T) {
 	connector, err := duckdb.NewConnector(":memory:", nil)
 	require.NoError(t, err)
-	defer connector.Close()
+	defer func() { _ = connector.Close() }()
 	for name, options := range map[string][]OptionFunc{
 		"zero timeout":  {WithResultCacheDisabled(), WithTransactionalCatalogGuard(TransactionOptions{MaxResultBytes: 1})},
 		"zero bytes":    {WithResultCacheDisabled(), WithTransactionalCatalogGuard(TransactionOptions{Timeout: time.Second})},

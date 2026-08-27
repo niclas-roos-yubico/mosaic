@@ -235,6 +235,9 @@ func (db *DB) newValidators(allowedSchemas []string) []Validator {
 	validators := make([]Validator, 0, 4)
 	if len(allowedSchemas) > 0 {
 		validators = append(validators, newBaseTableValidator(allowedSchemas))
+		// FORK[cte-scope-validator]: kept as a second, independent validator beside upstream's rather than folded into it --
+		// upstream's CTE exemption is scope-blind (platform#8k4b) and only a denial it cannot reach fixes that. Body in cte_scope.go.
+		validators = append(validators, newCTEScopeValidator())
 	}
 	if len(db.functionBlocklist) > 0 {
 		validators = append(validators, newFunctionBlocklistValidator(db.functionBlocklist))

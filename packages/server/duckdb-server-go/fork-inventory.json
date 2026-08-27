@@ -20,6 +20,8 @@
     "pkg/platformauth/regression_test.go",
     "pkg/query/arrow_pool.go",
     "pkg/query/catalog_guard_test.go",
+    "pkg/query/cte_scope.go",
+    "pkg/query/cte_scope_fork_test.go",
     "pkg/query/driver_query.go",
     "pkg/query/external_access.go",
     "pkg/query/external_access_global_test.go",
@@ -199,6 +201,12 @@
       "slug": "validators-extract",
       "file": "pkg/query/query.go",
       "why": "validator construction extracted from validateQuery into newValidators so validateQueryOn builds the identical set; duplicating the list fork-side would silently omit any validator upstream later adds, and a conflict is the correct failure mode for security code. Extracted ADJACENTLY in this upstream file: costs 1 deletion (the signature line), where relocating it to a fork-owned file would break the adjacency git scores as context (AGENTS.md rule 3). Compiler-protected: validate_on.go calls it",
+      "upstream": "candidate"
+    },
+    {
+      "slug": "cte-scope-validator",
+      "file": "pkg/query/query.go",
+      "why": "ADDITIVE, 0 deletions: one appended statement registering the fork-owned cteScopeValidator (cte_scope.go) beside upstream's baseTableValidator. Fixes platform#8k4b -- upstream's empty-schema exemption accepts a CTE of the right NAME declared anywhere in the statement, in any scope, in any statement of the batch, so an unreferenced decoy CTE exempted the target: reads outside allowed_schemas, and arbitrary local file reads once external access is on (a bare path in FROM is a BASE_TABLE whose table_name is the path). It is a SECOND validator rather than a repair of the first on purpose (rule 4): errors are joined and any error denies, so the composite permits only what both permit, and neither gate can be weakened by a change to the other. Folding them together would move the guarantee onto upstream's line, which is the failure rule 4 already records. SYNC HAZARD: dropping the append compiles clean and leaves every other pkg/query test green, because baseTableValidator still answers everything else correctly. Measured: cte_scope_fork_test.go turns red -- 3 end-to-end tests, 6 scope cases and the source guard TestNewValidatorsRetainsTheCTEScopeHook",
       "upstream": "candidate"
     },
     {

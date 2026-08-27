@@ -441,3 +441,21 @@ func TestForkInventoryAndPkgQueryAgreeOnSlugs(t *testing.T) {
 			"this file's source-guard tables name %q, which pkg/query no longer marks", slug)
 	}
 }
+
+// TestGuardedModeConstructsNoResultCache is the behavioural half of the result-cache invariant.
+// TestQueryGoRetainsNewConstructorHooks pins the discardCacheIfDisabled call site textually, which
+// catches a merge that DELETES query.go's hook -- but not a discardCacheIfDisabled that is changed
+// to return cache unconditionally, and not a resolution of the form `_ = discardCacheIfDisabled(...)`
+// that keeps the pinned substring and drops the assignment. Both of those leave a live otter cache
+// on a guarded DB, which is exactly what executeGuarded's validate-before-cache-read ordering
+// assumes cannot happen. Asserting on db.cache closes all three loss modes and survives any rename.
+func TestGuardedModeConstructsNoResultCache(t *testing.T) {
+	db, _ := guardedTransactionDB(t, "CREATE SCHEMA tenant; CREATE TABLE tenant.t AS SELECT 1 AS value;",
+		TransactionOptions{Timeout: time.Minute, MaxResultBytes: 1 << 20})
+
+	require.Nil(t, db.cache,
+		"guarded mode must hold no otter cache: New constructs one and discardCacheIfDisabled must "+
+			"throw it away (FORK[result-cache-discard]). A non-nil cache here means a guarded query "+
+			"could be served from cache without the validation and live catalog check that "+
+			"executeGuarded runs first.")
+}

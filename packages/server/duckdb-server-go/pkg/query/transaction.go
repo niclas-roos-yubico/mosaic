@@ -185,11 +185,11 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 	}
 
 	// CONTROLLER RULING: this branch is unreachable by construction. New rejects Transaction != nil &&
-	// !DisableResultCache, so whenever executeGuarded runs, db.resultCacheDisabled is always true and db.cache is
-	// always nil (see New). It is kept, unmodified, because it encodes the ordering the design rests on: if guarded
-	// mode ever grew a cache, the authoritative validation and live catalog check above must still run before any
-	// cache read, never after. Deleting the branch would delete that documented invariant along with the dead code.
-	if !db.resultCacheDisabled {
+	// !DisableResultCache, so whenever executeGuarded runs, db.cache is always nil (see New). It is kept,
+	// unmodified, because it encodes the ordering the design rests on: if guarded mode ever grew a cache, the
+	// authoritative validation and live catalog check above must still run before any cache read, never after.
+	// Deleting the branch would delete that documented invariant along with the dead code.
+	if db.cache != nil {
 		if _, cached := db.cacheGet(string(format), statement); cached != nil {
 			return cached, nil
 		}

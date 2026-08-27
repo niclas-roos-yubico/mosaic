@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync" // FORK: single-source WebSocket close via sync.Once.
-	"time" // FORK: WebSocket expiry enforcement.
+	"sync" // FORK[import-sync]: sync.Once for single-source websocket close.
+	"time" // FORK[import-time]: websocket expiry enforcement.
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -54,12 +54,11 @@ type commandExecutor interface {
 type handler struct {
 	db                 commandExecutor
 	schemaMatchHeaders []string
-	// FORK: JWT-derived schema/expiry resolution, see schema_resolver.go.
-	schemaResolver   SchemaResolver
-	logger           *slog.Logger
-	authorizer       Authorizer
-	httpHandler      http.Handler
-	websocketOptions WebSocketOptions
+	schemaResolver     SchemaResolver // FORK[handler-schema-resolver-field]: resolver must be reachable from upstream's handler methods.
+	logger             *slog.Logger
+	authorizer         Authorizer
+	httpHandler        http.Handler
+	websocketOptions   WebSocketOptions
 }
 
 // New constructs a Mosaic HTTP and WebSocket handler backed by db. Omitting
@@ -81,7 +80,7 @@ func newHandler(db commandExecutor, cfg config) *handler {
 	s := &handler{
 		db:                 db,
 		schemaMatchHeaders: cfg.schemaMatchHeaders,
-		schemaResolver:     cfg.schemaResolver, // FORK: JWT-derived schema/expiry resolution.
+		schemaResolver:     cfg.schemaResolver, // FORK[handler-schema-resolver-assign]: assignment in upstream's newHandler.
 		logger:             cfg.logger,
 		authorizer:         cfg.authorizer,
 		websocketOptions:   cfg.websocket,

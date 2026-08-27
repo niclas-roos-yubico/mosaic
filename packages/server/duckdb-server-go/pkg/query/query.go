@@ -99,7 +99,7 @@ func New(ctx context.Context, connector *duckdb.Connector, opts ...OptionFunc) (
 	if err != nil {
 		return nil, fmt.Errorf("query: failed to create cache: %w", err)
 	}
-	cache = discardCacheIfDisabled(cache, o) // FORK[result-cache-disable]: a nil db.cache is what every `db.cache != nil` guard below already keys on
+	cache = discardCacheIfDisabled(cache, o) // FORK[result-cache-discard]: a nil db.cache is what every `db.cache != nil` guard below already keys on
 
 	return &DB{
 		db: db,

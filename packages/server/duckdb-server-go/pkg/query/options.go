@@ -39,7 +39,7 @@ type Options struct {
 	// validation live in guarded.go.
 	Transaction *TransactionOptions
 
-	// FORK[result-cache-disable]: turns off the *sql.DB result cache entirely (see discardCacheIfDisabled in
+	// FORK[result-cache-option]: turns off the otter result cache entirely (see discardCacheIfDisabled in
 	// guarded.go). New requires this whenever Transaction != nil.
 	DisableResultCache bool
 }
@@ -137,7 +137,7 @@ func WithTransactionalCatalogGuard(options TransactionOptions) OptionFunc {
 	}
 }
 
-// FORK[result-cache-disable]: makes New leave db.cache nil (see discardCacheIfDisabled in guarded.go). Required
+// FORK[result-cache-option]: makes New leave db.cache nil (see discardCacheIfDisabled in guarded.go). Required
 // alongside WithTransactionalCatalogGuard.
 func WithResultCacheDisabled() OptionFunc {
 	return func(opts *Options) error {

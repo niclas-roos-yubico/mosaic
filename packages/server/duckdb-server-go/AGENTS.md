@@ -19,7 +19,7 @@ five-line edit inside `query.go`.
 
 The number we drive down is the **count of carried modifications**, tracked in
 [`fork-inventory.json`](fork-inventory.json). Not lines, not files — modifications.
-Today it is 55. Every one is a liability with a recurring cost.
+Today it is 44. Every one is a liability with a recurring cost.
 
 ## Rules
 
@@ -53,11 +53,16 @@ Adding beside upstream code is always preferred to changing or deleting it.
 - Upstream function needs different behaviour? Wrap or decorate it. Don't edit
   its body.
 
-Why this specific emphasis: `pkg/query/query.go` is +167/**-89** against
-upstream. Those 89 *deleted* lines, not the 167 added ones, are what make it the
-most expensive file in the fork to merge. A purely additive diff merges cleanly
-almost regardless of size; a deleted hunk conflicts with any upstream change
-that touches it.
+Why this specific emphasis: `pkg/query/query.go` was +167/**-89** against
+upstream when this document was written, which made it the most expensive file
+in the fork to merge. Those 89 *deleted* lines, not the 167 added ones, were the
+cost. A purely additive diff merges cleanly almost regardless of size; a deleted
+hunk conflicts with any upstream change that touches it.
+
+That thinning has since landed (`platform#z5x2` component 2): `query.go` is now
+**77/7** and `pkg/query/validator.go` **74/0**. The lesson stands — the deletion
+count is the number that matters — but read the current figures out of
+`fork-inventory.json`'s `deletions` map rather than from this paragraph.
 
 Non-additive changes are permitted where genuinely correct. They need an
 inventory entry saying why the additive form was rejected. Per-file deletion

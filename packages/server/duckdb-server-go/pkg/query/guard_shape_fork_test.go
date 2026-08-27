@@ -3,8 +3,12 @@ package query
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -286,5 +290,154 @@ func TestQueryGoRetainsTheRouteDecisionOnTheReceiver(t *testing.T) {
 					"is bypassed by any call *DB makes to itself and by New's own return value.",
 				site.signature, code, site.slug, site.lost)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Source guard for New's four constructor hooks.
+//
+// Measured, not assumed. Each of the four lines below was deleted in turn, the module rebuilt and the whole suite
+// re-run (Task 4, 2026-08-27). `go build -tags=duckdb_arrow ./...` stayed green for ALL FOUR -- the compiler catches
+// none of them, which is exactly the hazard the sync runbook warns about. Three were already caught at runtime:
+//
+//	transaction: o.Transaction      -> 11 tests red (the guard is disarmed package-wide)
+//	arrowPool:   newArrowPool(...)  -> 2 tests red (nil pool on the guarded path)
+//	validateGuardedOptions(o)       -> 1 test red (options_test.go)
+//	discardCacheIfDisabled(cache,o) -> NOTHING. Whole suite green with the hook gone.
+//
+// That last one is why this table exists. Losing it re-arms the cache read inside executeGuarded that transaction.go
+// documents as unreachable-by-construction, on a key derived from (format, statement) with no tenant or schema
+// dimension -- and no other check in the repository would say a word.
+//
+// A synthetic merge probe (Task 4) reproduced exactly that: an upstream commit renaming New's `cache` local to
+// `resultCache` merges into this branch with ZERO conflicts, leaves `discardCacheIfDisabled(cache, o)` dangling, and
+// the naive resolution -- delete the line that will not compile -- builds green. This table is the only thing that
+// goes red on it. The pins below therefore match the fork-owned CALLEE name, not the upstream argument names, so
+// that re-pointing a hook at a renamed upstream local (the CORRECT resolution) stays green while deleting the hook
+// does not.
+// ---------------------------------------------------------------------------
+
+var queryGoConstructorSites = []struct {
+	slug string
+	code string
+	lost string
+}{
+	{
+		slug: "guarded-option-validation",
+		code: "validateGuardedOptions(",
+		lost: "the pre-allocation rejection of unsafe guarded configurations; New would accept a zero timeout, " +
+			"a zero byte cap, or the result cache left enabled alongside the guard",
+	},
+	{
+		slug: "result-cache-discard",
+		code: "discardCacheIfDisabled(",
+		lost: "the only thing that makes db.cache nil in guarded mode; executeGuarded's cache read stops being " +
+			"unreachable-by-construction and starts keying guarded responses on (format, statement) alone",
+	},
+	{
+		slug: "guarded-state-field",
+		code: "transaction:",
+		lost: "the guard state itself; every route prelude then sees a nil db.transaction and falls through to " +
+			"upstream's unvalidated path, with the catalog guard silently disarmed",
+	},
+	{
+		slug: "arrow-pool-field",
+		code: "newArrowPool(",
+		lost: "the conn-paired Arrow pool the guarded coordinator acquires from",
+	},
+}
+
+func TestQueryGoRetainsNewConstructorHooks(t *testing.T) {
+	body := functionBody(t, readQueryGo(t), "func New(")
+	for _, site := range queryGoConstructorSites {
+		require.True(t, strings.Contains(body, site.code),
+			"query.go's New no longer contains %q: the %q hook is gone and with it %s.\n\n"+
+				"This compiles, and outside this file almost nothing else goes red.\n\n"+
+				"If upstream renamed something this hook names, RE-POINT the hook at the new name. Never delete "+
+				"it as unused leftover -- that is the fail-open this test exists to stop.",
+			site.code, site.slug, site.lost)
+		require.True(t, strings.Contains(body, "FORK["+site.slug+"]"),
+			"query.go's New lost the %q marker; either the hook must come back or its fork-inventory.json "+
+				"row must go (AGENTS.md PR checklist)", site.slug)
+	}
+}
+
+// TestForkInventoryAndPkgQueryAgreeOnSlugs pins the correspondence in both directions for every upstream-owned,
+// non-test file in pkg/query -- the analogue of platform_test.go's TestForkInventoryAndMainGoAgreeOnSlugs, which
+// covered only main.go. Before this existed, 25 of pkg/query's 28 inventory rows had rotted into orphans across
+// Tasks 2 and 3 with nothing to say so. A hook added without a row, a row left behind after a hook is removed, an
+// unslugged `// FORK:` marker, and a slug reused across two files are all red here rather than silent.
+func TestForkInventoryAndPkgQueryAgreeOnSlugs(t *testing.T) {
+	payload, err := os.ReadFile(filepath.Join("..", "..", "fork-inventory.json"))
+	require.NoError(t, err)
+	var inventory struct {
+		Entries []struct {
+			Slug string `json:"slug"`
+			File string `json:"file"`
+		} `json:"entries"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &inventory))
+
+	sources, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+
+	marker := regexp.MustCompile(`// FORK\[([a-z0-9-]+)\]`)
+	slugOwner := map[string]string{}
+
+	for _, source := range sources {
+		if strings.HasSuffix(source, "_test.go") {
+			continue
+		}
+		payload, err := os.ReadFile(source)
+		require.NoError(t, err)
+		body := string(payload)
+
+		// An unslugged marker is invisible to every check keyed on slugs, so it has to be caught here.
+		// require.False, not require.NotContains: NotContains renders the whole source file into the failure
+		// output and buries the message that says what is wrong.
+		require.False(t, strings.Contains(body, "// FORK:"),
+			"%s carries an unslugged // FORK: marker. Give it a slug and a fork-inventory.json row; retiring "+
+				"the row instead would delete the record of a real fork modification", source)
+
+		seen := map[string]bool{}
+		var sourceSlugs []string
+		for _, match := range marker.FindAllStringSubmatch(body, -1) {
+			if !seen[match[1]] {
+				seen[match[1]] = true
+				sourceSlugs = append(sourceSlugs, match[1])
+			}
+			if owner, ok := slugOwner[match[1]]; ok && owner != source {
+				require.Fail(t, "slug reused across files",
+					"slug %q appears in both %s and %s. AGENTS.md requires a slug to be unique in the "+
+						"package: one logical modification spanning two files gets one slug PER FILE, never "+
+						"one slug on two rows (see exec-denial-authorizer / exec-denial-schema-resolver)",
+					match[1], owner, source)
+			}
+			slugOwner[match[1]] = source
+		}
+
+		var inventorySlugs []string
+		for _, entry := range inventory.Entries {
+			if entry.File == path.Join("pkg", "query", source) {
+				inventorySlugs = append(inventorySlugs, entry.Slug)
+			}
+		}
+
+		require.ElementsMatch(t, inventorySlugs, sourceSlugs,
+			"%s's FORK slugs and its fork-inventory.json rows disagree; every marker needs a row and every "+
+				"row needs a marker (AGENTS.md PR checklist)", source)
+	}
+
+	// Keep this file's own source-guard tables from drifting out of date silently.
+	var guarded []string
+	for _, site := range queryGoGuardSites {
+		guarded = append(guarded, site.slug)
+	}
+	for _, site := range queryGoConstructorSites {
+		guarded = append(guarded, site.slug)
+	}
+	for _, slug := range guarded {
+		require.Contains(t, slugOwner, slug,
+			"this file's source-guard tables name %q, which pkg/query no longer marks", slug)
 	}
 }

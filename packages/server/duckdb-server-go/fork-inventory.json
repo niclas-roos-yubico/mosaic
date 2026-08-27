@@ -6,10 +6,14 @@
     ".github/workflows/test.yml"
   ],
   "fork_owned": [
+    "extension_files.go",
+    "extension_files_fork_test.go",
+    "extension_files_integration_fork_test.go",
     "extension_init.go",
     "extension_init_test.go",
     "main_flags_test.go",
     "platform.go",
+    "platform_quack_allowlist_fork_test.go",
     "platform_test.go",
     "quack_bootstrap.go",
     "quack_bootstrap_test.go",

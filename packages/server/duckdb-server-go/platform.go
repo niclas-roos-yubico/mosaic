@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/functionset"
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/platformauth"
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
@@ -27,6 +28,7 @@ type platformConfig struct {
 	transactionTimeout   *time.Duration
 	maxQueryResultBytes  *int64
 	quackBootstrapFD     *int
+	extensionFiles       *extensionFileFlag
 }
 
 // registerPlatformFlags declares the hardened-mode flags on the default FlagSet; it must be called
@@ -34,7 +36,11 @@ type platformConfig struct {
 // one. The JWT audience is deliberately absent: newSessionValidator hardcodes it, so it can never
 // be operator-settable.
 func registerPlatformFlags() *platformConfig {
+	extensionFiles := &extensionFileFlag{}
+	flag.Var(extensionFiles, "load-extension-file",
+		"Absolute path to a baked .duckdb_extension artifact, loaded on every connection. Repeatable; order is load order (httpfs before quack). Requires --enable-external-access=true.")
 	return &platformConfig{
+		extensionFiles:       extensionFiles,
 		jwksURL:              flag.String("platform-session-jwks-url", "", "Platform session JWKS URL; required"),
 		jwtIssuer:            flag.String("platform-jwt-iss", "https://<umbrella-host>/platform", "Expected Platform session JWT issuer"),
 		jwtAlgorithm:         flag.String("platform-jwt-alg", "RS256", "Allowed Platform session JWT signing algorithm"),
@@ -65,6 +71,13 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 		reason = "--quack-bootstrap-fd must be -1 or at least 3"
 	case *p.quackBootstrapFD >= 3 && !*p.enableExternalAccess:
 		reason = "--quack-bootstrap-fd requires --enable-external-access=true"
+	// LOAD by absolute path is refused once external access is latched off ("Loading external
+	// extensions is disabled through configuration"), and the initializer fires on every physical
+	// connection -- including pool growth long after the latch. Allowing this flag in default mode
+	// would therefore work at startup and then fail the first connection opened after the latch,
+	// which is a far worse failure than refusing the combination here.
+	case len(p.extensionFiles.paths()) > 0 && !*p.enableExternalAccess:
+		reason = "--load-extension-file requires --enable-external-access=true"
 	case *p.enableExternalAccess && !*p.disableResultCache:
 		reason = "--enable-external-access=true requires --disable-result-cache=true"
 	case *p.transactionTimeout <= 0:
@@ -76,6 +89,12 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 	case strings.TrimSpace(schemaMatchHeadersStr) != "":
 		reason = "--schema-match-headers is not permitted; schemas are derived from the validated session JWT"
 	default:
+		// Path-shape checks produce their own message rather than a fixed reason string.
+		if fileErr := validateExtensionFiles(p.extensionFiles.paths()); fileErr != nil {
+			err := fmt.Errorf("main: %w", fileErr)
+			fmt.Fprintln(os.Stderr, err)
+			return err
+		}
 		return nil
 	}
 	err := fmt.Errorf("main: %s", reason)
@@ -90,9 +109,22 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 // --function-allowlist was passed, upstream already appended an identical WithFunctionAllowlist;
 // option funcs are last-write-wins over Options.FunctionAllowlist, so the duplicate is a no-op and
 // ours -- appended last -- is the one that lands.
+//
+// Exclude drops every Quack name from the user-facing allowlist (kata platform#qt3y). functionset
+// lists Quack in coreExtensions, so its `compute` inventory -- quack_check_token,
+// quack_nop_authorization, quack_uri_parser -- otherwise flows into DefaultFunctions() and is
+// callable from an ordinary browser query. quack_check_token in particular is a token oracle for the
+// privileged loopback write channel; a 32-byte random token makes it unguessable, but the channel is
+// deliberately kept off the public query path and an oracle on it does not belong there either.
+// Excluding Quack.All() rather than the three names by hand means an upstream addition to either
+// bucket is covered without anyone noticing it needs to be. Exclude is applied last inside
+// resolveFunctionAllowlist, so an operator cannot re-add a Quack name via --function-allowlist.
 func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionFunc {
 	options := []query.OptionFunc{
-		query.WithFunctionAllowlist(query.FunctionAllowlistOptions{Include: allowlistInclude}),
+		query.WithFunctionAllowlist(query.FunctionAllowlistOptions{
+			Include: allowlistInclude,
+			Exclude: functionset.Quack.All(),
+		}),
 		query.WithRemoteURILiteralRejection(),
 	}
 	if *p.disableResultCache {

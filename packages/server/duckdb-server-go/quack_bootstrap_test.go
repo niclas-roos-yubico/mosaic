@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -88,6 +89,27 @@ func TestStartQuackErrorRedactsBootstrapSecrets(t *testing.T) {
 	require.NotContains(t, err.Error(), rawPayload)
 }
 
+// inheritedFD hands readQuackBootstrapFD a descriptor shaped like the one it actually gets in
+// production: inherited from the parent and owned by no *os.File in this process.
+//
+// Passing int(r.Fd()) instead leaves r registered with the runtime poller for that same descriptor
+// number, and os.NewFile then tries to register it a second time. On Linux epoll_ctl(EPOLL_CTL_ADD)
+// rejects that with EEXIST, so the poll.FD gets no runtime poller context and SetReadDeadline
+// returns ErrNoDeadline ("file type does not support deadline") -- which is a property of the test's
+// setup, not of the production path. macOS is the reason this was not caught locally: kqueue's
+// EV_ADD updates an existing registration rather than failing, so the same code passes there.
+// Verified both ways on linux/amd64 go1.25 and darwin/arm64.
+//
+// Dup also transfers ownership the way production expects: readQuackBootstrapFD closes the
+// descriptor it is given, so the caller must not keep one open alongside it.
+func inheritedFD(t *testing.T, f *os.File) int {
+	t.Helper()
+	fd, err := syscall.Dup(int(f.Fd()))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	return fd
+}
+
 func TestQuackBootstrapFDDeadline(t *testing.T) {
 	// Shorten the production deadline for this test only, via the package-level var (not a
 	// parameter of readQuackBootstrapFD), and restore it unconditionally afterward.
@@ -100,7 +122,7 @@ func TestQuackBootstrapFDDeadline(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = w.Close() }()
 	started := time.Now()
-	_, err = readQuackBootstrapFD(int(r.Fd()))
+	_, err = readQuackBootstrapFD(inheritedFD(t, r))
 	elapsed := time.Since(started)
 
 	require.Error(t, err)
@@ -116,7 +138,7 @@ func TestQuackBootstrapFDReadsClosedPipe(t *testing.T) {
 	_, err = w.WriteString(validBootstrapJSON())
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
-	cfg, err := readQuackBootstrapFD(int(r.Fd()))
+	cfg, err := readQuackBootstrapFD(inheritedFD(t, r))
 	require.NoError(t, err)
 	require.Equal(t, 9494, cfg.Port)
 }

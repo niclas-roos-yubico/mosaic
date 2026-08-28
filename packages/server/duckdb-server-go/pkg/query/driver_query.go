@@ -47,20 +47,12 @@ func scalarOn(ctx context.Context, conn driver.Conn, statement string, args ...d
 	return values[0], nil
 }
 
-func checkCatalogOn(ctx context.Context, conn driver.Conn, refs []tableRef) error {
-	for _, ref := range refs {
-		value, err := scalarOn(ctx, conn, `
-			SELECT coalesce(max(table_type), 'ABSENT')
-			FROM information_schema.tables
-			WHERE table_schema = ? AND table_name = ?`,
-			driver.NamedValue{Ordinal: 1, Value: ref.SchemaName},
-			driver.NamedValue{Ordinal: 2, Value: ref.TableName})
-		if err != nil {
-			return fmt.Errorf("query: catalog lookup failed: %w", err)
-		}
-		if fmt.Sprint(value) != "BASE TABLE" {
-			return fmt.Errorf("%w: '%s.%s' is not a physical table", ErrAccessDenied, ref.SchemaName, ref.TableName)
-		}
+// checkCatalogOn authorizes the live catalog behind the references a query touched, on the connection and
+// transaction the query was validated on. allowedSchemas is threaded through because a VIEW's body is validated
+// under the CALLER's schema bound; see checkRelationsOn in view_body.go, which owns the per-relation decision.
+func (db *DB) checkCatalogOn(ctx context.Context, conn driver.Conn, refs []tableRef, allowedSchemas []string) error {
+	if err := db.checkRelationsOn(ctx, conn, refs, allowedSchemas, 0, make(map[tableRef]struct{})); err != nil {
+		return err
 	}
 	value, err := scalarOn(ctx, conn, `
 		SELECT count(*)::BIGINT FROM duckdb_functions()

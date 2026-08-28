@@ -16,7 +16,7 @@ func TestCatalogCheckAllowsOnlyPhysicalTables(t *testing.T) {
 	tx, err := pc.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 	require.NoError(t, err)
 	defer func() { _ = tx.Rollback() }()
-	require.NoError(t, checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "metrics"}}))
+	require.NoError(t, db.checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "metrics"}}, []string{"tenant_a"}))
 }
 
 func TestCatalogCheckRejectsViewAndUserMacro(t *testing.T) {
@@ -33,7 +33,7 @@ func TestCatalogCheckRejectsViewAndUserMacro(t *testing.T) {
 			tx, err := pc.conn.(driver.ConnBeginTx).BeginTx(t.Context(), driver.TxOptions{})
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
-			err = checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "target"}})
+			err = db.checkCatalogOn(t.Context(), pc.conn, []tableRef{{SchemaName: "tenant_a", TableName: "target"}}, []string{"tenant_a"})
 			require.ErrorIs(t, err, ErrAccessDenied)
 		})
 	}
@@ -60,7 +60,7 @@ func TestCatalogTransactionPinsTableBeforeViewReplacement(t *testing.T) {
 	}()
 	refs, err := db.validateQueryOn(t.Context(), reader.conn, `SELECT * FROM tenant_a.target`, []string{"tenant_a"})
 	require.NoError(t, err)
-	require.NoError(t, checkCatalogOn(t.Context(), reader.conn, refs))
+	require.NoError(t, db.checkCatalogOn(t.Context(), reader.conn, refs, []string{"tenant_a"}))
 
 	writer, err := connector.Connect(t.Context())
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestCatalogTransactionPinsTableBeforeViewReplacement(t *testing.T) {
 	defer func() { _ = nextTx.Rollback() }()
 	nextRefs, err := db.validateQueryOn(t.Context(), next.conn, `SELECT * FROM tenant_a.target`, []string{"tenant_a"})
 	require.NoError(t, err)
-	require.ErrorIs(t, checkCatalogOn(t.Context(), next.conn, nextRefs), ErrAccessDenied)
+	require.ErrorIs(t, db.checkCatalogOn(t.Context(), next.conn, nextRefs, []string{"tenant_a"}), ErrAccessDenied)
 }
 
 func TestCatalogTransactionPinsMacroFreeSnapshot(t *testing.T) {
@@ -114,7 +114,7 @@ func TestCatalogTransactionPinsMacroFreeSnapshot(t *testing.T) {
 	}()
 	refs, err := db.validateQueryOn(t.Context(), reader.conn, statement, []string{"tenant_a"})
 	require.NoError(t, err)
-	require.NoError(t, checkCatalogOn(t.Context(), reader.conn, refs))
+	require.NoError(t, db.checkCatalogOn(t.Context(), reader.conn, refs, []string{"tenant_a"}))
 
 	writer, err := connector.Connect(t.Context())
 	require.NoError(t, err)
@@ -140,5 +140,5 @@ func TestCatalogTransactionPinsMacroFreeSnapshot(t *testing.T) {
 	defer func() { _ = nextTx.Rollback() }()
 	nextRefs, err := db.validateQueryOn(t.Context(), next.conn, statement, []string{"tenant_a"})
 	require.NoError(t, err)
-	require.ErrorIs(t, checkCatalogOn(t.Context(), next.conn, nextRefs), ErrAccessDenied)
+	require.ErrorIs(t, db.checkCatalogOn(t.Context(), next.conn, nextRefs, []string{"tenant_a"}), ErrAccessDenied)
 }

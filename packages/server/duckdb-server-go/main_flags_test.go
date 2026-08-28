@@ -42,6 +42,8 @@ func runTestBinary(t *testing.T, binary string, args ...string) (string, int) {
 func TestBinaryRejectsUnsafeModes(t *testing.T) {
 	binary := buildTestBinary(t)
 	const jwks = "--platform-session-jwks-url=http://127.0.0.1:1/jwks"
+	const extAccess = "--enable-external-access=true"
+	const noCache = "--disable-result-cache=true"
 	tests := []struct {
 		name string
 		args []string
@@ -62,6 +64,19 @@ func TestBinaryRejectsUnsafeModes(t *testing.T) {
 		{name: "extension file relative path", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=ext/quack.duckdb_extension"}, want: "must be an absolute path"},
 		{name: "extension file wrong suffix", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/quack.so"}, want: "must name a .duckdb_extension artifact"},
 		{name: "extension file missing", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/absent.duckdb_extension"}, want: "is not readable"},
+		// Two-tier validation only runs inside the guarded transaction, which only exists in
+		// external-access mode. Accepting the root outside it configures a check that never runs.
+		{name: "mirror root without external access", args: []string{jwks, "--mirror-file-root=gs://bucket/mirrors"}, want: "--mirror-file-root requires --enable-external-access=true"},
+		// A root that bounds nothing must not boot. Each of these looks configured and admits everything;
+		// the glob one reintroduces the sibling-prefix leak through the root rather than the comparison.
+		// The message comes from query.New rather than validate, which is why these assert on its wording.
+		{name: "mirror root is a glob", args: []string{jwks, extAccess, noCache, "--mirror-file-root=/srv/mirror*"}, want: "must not contain glob metacharacters"},
+		{name: "mirror root is the filesystem root", args: []string{jwks, extAccess, noCache, "--mirror-file-root=/"}, want: "must not be the filesystem root"},
+		{name: "mirror root is a bare bucket", args: []string{jwks, extAccess, noCache, "--mirror-file-root=gs://bucket"}, want: "must name a prefix below the bucket"},
+		{name: "mirror root is a bare scheme", args: []string{jwks, extAccess, noCache, "--mirror-file-root=gs://"}, want: "must name a prefix below the bucket"},
+		{name: "mirror root is relative", args: []string{jwks, extAccess, noCache, "--mirror-file-root=srv/mirror"}, want: "must be absolute"},
+		{name: "mirror root traverses", args: []string{jwks, extAccess, noCache, "--mirror-file-root=/srv/../mirror"}, want: "must not contain a parent-directory segment"},
+		{name: "mirror root has whitespace", args: []string{jwks, extAccess, noCache, "--mirror-file-root=/srv/mirror "}, want: "must not have leading or trailing whitespace"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

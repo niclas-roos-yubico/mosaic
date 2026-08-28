@@ -30,6 +30,12 @@ type TransactionOptions struct {
 
 	// MaxResultBytes caps the number of encoded response bytes buffered before being released to the client.
 	MaxResultBytes int64
+
+	// MirrorFileRoot arms two-tier validation (view_body.go): a schema-qualified VIEW may be served when its
+	// stored body reads Parquet under this prefix. Empty -- the default -- refuses every VIEW exactly as this
+	// package did before. It lives here rather than on Options because a view body is only ever resolved inside
+	// the guarded transaction, so a root without the guard would configure a check that never runs.
+	MirrorFileRoot string
 }
 
 // guardedJSON, guardedArrow and writeGuarded are the bodies behind query.go's four route hooks. They are methods on
@@ -77,6 +83,12 @@ func validateGuardedOptions(o *Options) error {
 	}
 	if !o.DisableResultCache {
 		return errors.New("query: transactional catalog guard requires the result cache to be disabled")
+	}
+	// A view body may read files, so it must never be function-unrestricted. viewBodyValidators applies an
+	// allowlist unconditionally; this refuses the configuration in which that allowlist would be nothing but the
+	// two Parquet readers, which is a startup failure rather than a silently very narrow boundary.
+	if o.Transaction.MirrorFileRoot != "" && o.FunctionAllowlist == nil {
+		return errors.New("query: a mirror file root requires a configured function allowlist")
 	}
 	return nil
 }

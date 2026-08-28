@@ -132,7 +132,11 @@ func WithRemoteURILiteralRejection() OptionFunc {
 // live in guarded.go. New rejects this option unless WithResultCacheDisabled is also supplied.
 func WithTransactionalCatalogGuard(options TransactionOptions) OptionFunc {
 	return func(opts *Options) error {
-		opts.Transaction = &TransactionOptions{Timeout: options.Timeout, MaxResultBytes: options.MaxResultBytes}
+		opts.Transaction = &TransactionOptions{
+			Timeout:        options.Timeout,
+			MaxResultBytes: options.MaxResultBytes,
+			MirrorFileRoot: options.MirrorFileRoot,
+		}
 		return nil
 	}
 }

@@ -38,6 +38,8 @@
     "pkg/query/transaction.go",
     "pkg/query/transaction_test.go",
     "pkg/query/validate_on.go",
+    "pkg/query/view_body.go",
+    "pkg/query/view_body_fork_test.go",
     "pkg/query/writer_test.go",
     "pkg/server/errors_fork_test.go",
     "pkg/server/fork_source_test.go",

@@ -29,6 +29,7 @@ type platformConfig struct {
 	maxQueryResultBytes  *int64
 	quackBootstrapFD     *int
 	extensionFiles       *extensionFileFlag
+	mirrorFileRoot       *string
 }
 
 // registerPlatformFlags declares the hardened-mode flags on the default FlagSet; it must be called
@@ -49,6 +50,7 @@ func registerPlatformFlags() *platformConfig {
 		transactionTimeout:   flag.Duration("query-transaction-timeout", 30*time.Second, "Maximum guarded query duration including pool wait and materialization"),
 		maxQueryResultBytes:  flag.Int64("max-query-result-bytes", 64<<20, "Maximum encoded JSON or Arrow response bytes"),
 		quackBootstrapFD:     flag.Int("quack-bootstrap-fd", -1, "Inherited descriptor carrying versioned Quack bootstrap config; -1 disables"),
+		mirrorFileRoot:       flag.String("mirror-file-root", "", "Prefix a platform-authored VIEW body may read Parquet from, e.g. gs://bucket/mirrors. Empty refuses every view; requires --enable-external-access=true"),
 	}
 }
 
@@ -80,6 +82,14 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 		reason = "--load-extension-file requires --enable-external-access=true"
 	case *p.enableExternalAccess && !*p.disableResultCache:
 		reason = "--enable-external-access=true requires --disable-result-cache=true"
+	// Two-tier validation runs inside the guarded transaction, and the guard is only armed in
+	// external-access mode. Accepting the root without it would configure a check that silently
+	// never runs -- the operator would believe views were bounded to a prefix when in fact every
+	// view is still refused, and a later flag change would quietly widen the boundary.
+	case *p.mirrorFileRoot != "" && !*p.enableExternalAccess:
+		reason = "--mirror-file-root requires --enable-external-access=true"
+	case strings.TrimSpace(*p.mirrorFileRoot) != *p.mirrorFileRoot:
+		reason = "--mirror-file-root must not have leading or trailing whitespace"
 	case *p.transactionTimeout <= 0:
 		reason = "--query-transaction-timeout must be positive"
 	case *p.maxQueryResultBytes <= 0:
@@ -133,6 +143,7 @@ func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionF
 	if *p.enableExternalAccess {
 		options = append(options, query.WithTransactionalCatalogGuard(query.TransactionOptions{
 			Timeout: *p.transactionTimeout, MaxResultBytes: *p.maxQueryResultBytes,
+			MirrorFileRoot: *p.mirrorFileRoot,
 		}))
 	}
 	return options
@@ -187,6 +198,9 @@ func (p *platformConfig) addLogFields(config map[string]interface{}, quackStarte
 	config["query_transaction_timeout"] = p.transactionTimeout.String()
 	config["max_query_result_bytes"] = *p.maxQueryResultBytes
 	config["quack_bootstrap_started"] = quackStarted
+	// The root itself, not a boolean: an operator diagnosing a refused view needs to see which prefix
+	// the binary is actually enforcing, and it is a configured path, not a credential.
+	config["mirror_file_root"] = *p.mirrorFileRoot
 }
 
 // newSessionValidator builds the platform session JWT validator. The audience is hardcoded to

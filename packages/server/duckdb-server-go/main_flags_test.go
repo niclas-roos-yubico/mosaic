@@ -62,6 +62,10 @@ func TestBinaryRejectsUnsafeModes(t *testing.T) {
 		{name: "extension file relative path", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=ext/quack.duckdb_extension"}, want: "must be an absolute path"},
 		{name: "extension file wrong suffix", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/quack.so"}, want: "must name a .duckdb_extension artifact"},
 		{name: "extension file missing", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--load-extension-file=/opt/ext/absent.duckdb_extension"}, want: "is not readable"},
+		// Two-tier validation only runs inside the guarded transaction, which only exists in
+		// external-access mode. Accepting the root outside it configures a check that never runs.
+		{name: "mirror root without external access", args: []string{jwks, "--mirror-file-root=gs://bucket/mirrors"}, want: "--mirror-file-root requires --enable-external-access=true"},
+		{name: "mirror root with whitespace", args: []string{jwks, "--enable-external-access=true", "--disable-result-cache=true", "--mirror-file-root=gs://bucket/mirrors "}, want: "must not have leading or trailing whitespace"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

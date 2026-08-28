@@ -180,7 +180,7 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 	if err != nil {
 		return nil, normalizeGuardError(guardCtx, err)
 	}
-	if err := checkCatalogOn(guardCtx, pc.conn, refs); err != nil {
+	if err := db.checkCatalogOn(guardCtx, pc.conn, refs, schemas); err != nil {
 		return nil, normalizeGuardError(guardCtx, err)
 	}
 

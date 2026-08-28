@@ -48,9 +48,15 @@ import (
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/functionset/remoteread"
 )
 
-// maxViewDepth bounds how many times a body may itself reference a view. The user's query is depth 0, so 4
-// permits a mirror view over a staging view over a partition view and refuses anything deeper. Cycles cannot be
-// created in DuckDB, but the bound holds regardless of that.
+// maxViewDepth bounds recursion, not nesting. It caps how deep a single UNASSISTED chain of view-inside-view
+// expansion may go: the user's query is depth 0, so 4 permits a mirror view over a staging view over a partition
+// view and refuses anything deeper. Cycles cannot be created in DuckDB, but the bound holds regardless.
+//
+// It is deliberately NOT a ceiling on how many views one query may reach. `visited` is shared across the whole
+// check, so naming the intermediate views alongside the deep one resolves each at depth 0 and the chain
+// completes. That is fine and is the point: every view in it is still fully validated, exactly once. What the
+// bound exists to stop is unbounded work and unbounded stack from a single reference, not a query that spells
+// its own chain out.
 const maxViewDepth = 4
 
 // mirrorReadFunctions are the only file-reading functions a view body may call, added to the caller's allowlist
@@ -79,7 +85,7 @@ func (db *DB) checkRelationsOn(
 
 		value, err := scalarOn(ctx, conn, `
 			SELECT coalesce(max(table_type), 'ABSENT')
-			FROM information_schema.tables
+			FROM system.information_schema.tables
 			WHERE table_schema = ? AND table_name = ?`,
 			driver.NamedValue{Ordinal: 1, Value: ref.SchemaName},
 			driver.NamedValue{Ordinal: 2, Value: ref.TableName})
@@ -126,10 +132,19 @@ func (db *DB) checkViewBodyOn(
 	// Exactly one non-internal view in the current database, or nothing. The fork does not enforce catalog
 	// qualification (a known gap), so a name matching in two attached databases must fail closed rather than
 	// have one of them picked arbitrarily.
+	//
+	// Three of the four filters below are UNREACHABLE defensive terms, and deliberately so. Given
+	// database_name = current_database(), a schema-qualified view name is unique, so count(*) can only be 0 or
+	// 1 and the CASE can never fire; internal views live in system schemas, which no caller's allowed_schemas
+	// contains, so a ref never names one; and nothing on the guarded path ever ATTACHes, so a second catalog
+	// cannot appear on a pooled connection in the first place. Security review flagged all three as surviving
+	// mutation — correctly, and there is no test that could kill those mutations without first building a
+	// configuration the server cannot reach. They stay because each one becomes load-bearing the moment
+	// another is weakened, which is the case they exist for. Do not delete one because it is untested.
 	value, err := scalarOn(ctx, conn, `
 		SELECT CASE WHEN count(*) = 1 THEN max(sql) END
-		FROM duckdb_views()
-		WHERE database_name = current_database()
+		FROM system.main.duckdb_views()
+		WHERE database_name = system.main.current_database()
 		  AND internal = false
 		  AND schema_name = ? AND view_name = ?`,
 		driver.NamedValue{Ordinal: 1, Value: ref.SchemaName},
@@ -166,6 +181,52 @@ func (db *DB) mirrorFileRoot() string {
 	return strings.TrimSuffix(db.transaction.MirrorFileRoot, "/") + "/"
 }
 
+// validateMirrorFileRoot rejects a root that does not actually bound anything. The prefix check is only as good
+// as the prefix, and several roots that look configured bound nothing at all:
+//
+//   - "/" or a bare scheme like "gs://" -- every path is under it;
+//   - a glob such as "/srv/mirror*" -- mirrorFileRoot appends "/", giving "/srv/mirror*/", and DuckDB then
+//     expands "/srv/mirror*/x.parquet" across every sibling directory while the literal still matches the
+//     prefix. This is the sibling-prefix leak the trailing separator was added to close, reintroduced through
+//     the root instead of through the comparison;
+//   - a relative path -- what it resolves to depends on the serving process's working directory;
+//   - "..", for the same reason it is refused in a path.
+//
+// Startup is the only place this can be caught. A root is operator input read once, so a shape check here costs
+// nothing per query and a bad root is a boot failure rather than a boundary that silently admits everything.
+func validateMirrorFileRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+	if strings.ContainsAny(root, "*?[{") {
+		return fmt.Errorf("query: mirror file root %q must not contain glob metacharacters", root)
+	}
+	if strings.Contains(root, "..") {
+		return fmt.Errorf("query: mirror file root %q must not contain a parent-directory segment", root)
+	}
+	if strings.TrimSpace(root) != root {
+		return fmt.Errorf("query: mirror file root %q must not have leading or trailing whitespace", root)
+	}
+	path := root
+	if scheme := strings.Index(root, "://"); scheme >= 0 {
+		// An object-store root needs a bucket AND at least one prefix component under it: "gs://bucket/" is
+		// the whole bucket, which is not a bound worth having.
+		authorityAndPath := root[scheme+len("://"):]
+		slash := strings.Index(authorityAndPath, "/")
+		if slash < 0 || strings.Trim(authorityAndPath[slash:], "/") == "" {
+			return fmt.Errorf("query: mirror file root %q must name a prefix below the bucket", root)
+		}
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("query: mirror file root %q must be absolute", root)
+	}
+	if strings.Trim(path, "/") == "" {
+		return fmt.Errorf("query: mirror file root %q must not be the filesystem root", root)
+	}
+	return nil
+}
+
 // viewBodyValidators is the BODY tier. It is not derived from newValidators: the sets differ in both directions,
 // so expressing one as a tweak of the other would let a change to the user's set silently change the body's.
 //
@@ -173,22 +234,72 @@ func (db *DB) mirrorFileRoot() string {
 // configured, because a body that may read files must never be function-unrestricted. validateGuardedOptions
 // refuses a MirrorFileRoot without a configured allowlist, so this is defence in depth rather than the boundary.
 //
-// remoteURILiteralValidator is deliberately absent and replaced by mirrorRootValidator, which is strictly
-// narrower: it demands the literal be under the root rather than merely not be a remote URI, and it refuses
-// computed path expressions the remote-URI scan would walk past.
+// remoteURILiteralValidator is absent because it would reject the very thing a mirror body exists to read: a
+// gs:// literal. mirrorRootValidator replaces its PATH check and is narrower there -- it demands the literal be
+// under the root rather than merely not be a remote URI, and it refuses computed path expressions the
+// remote-URI scan walks past.
+//
+// It is NOT narrower overall, and an earlier revision of this comment claiming so was wrong. The remote-URI
+// validator does a second, unrelated job: rejecting the nested SQL executors. Dropping it dropped that, and the
+// function allowlist did not cover the gap -- `--function-allowlist=query` is a supported operator flag, and a
+// body calling query('SELECT * FROM private_ns.salaries') was served across the caller's schema bound, because
+// the nested string is never parsed and so no validator here ever sees it. nestedSQLValidator restores that
+// check as its own gate rather than folding it into mirrorRootValidator: two concerns, two validators
+// (AGENTS.md rule 4).
 func (db *DB) viewBodyValidators(allowedSchemas []string, root string) []Validator {
 	allowlist := append(append([]string(nil), db.functionAllowlist...), mirrorReadFunctions...)
-	validators := []Validator{
+	return []Validator{
 		newBaseTableValidator(allowedSchemas),
 		newCTEScopeValidator(),
 		newMirrorRootValidator(root),
+		newNestedSQLValidator(),
 		newFunctionAllowlistValidator(allowlist),
 	}
-	if len(db.functionBlocklist) > 0 {
-		validators = append(validators, newFunctionBlocklistValidator(db.functionBlocklist))
-	}
-	return validators
+	// No function BLOCKLIST branch: New rejects an allowlist and a blocklist together, and
+	// validateGuardedOptions requires an allowlist whenever a root is set, so a blocklist is unreachable in any
+	// configuration that reaches this function. A branch that cannot run is not defence in depth, it is a
+	// branch no test can cover.
 }
+
+// nestedSQLValidator refuses the executors that take SQL as a STRING. They are the one class the rest of this
+// file cannot reason about: the nested statement is never parsed, so the schema bound, the mirror root and the
+// recursion all see an opaque literal and pass it.
+//
+// The names come from remote_uri.go's own lists rather than being restated here, so a name added there is
+// covered here without anyone remembering to.
+type nestedSQLValidator struct{ errs []error }
+
+func newNestedSQLValidator() Validator { return &nestedSQLValidator{} }
+
+func (v *nestedSQLValidator) CheckNode(node map[string]any, _ []string) {
+	var functionName string
+	switch node["type"] {
+	case "TABLE_FUNCTION":
+		function, ok := node["function"].(map[string]any)
+		if !ok {
+			return // malformed; mirrorRootValidator reports the shape error
+		}
+		functionName, _ = function["function_name"].(string)
+	default:
+		if node["class"] != "FUNCTION" && node["class"] != "WINDOW" {
+			return
+		}
+		functionName, _ = node["function_name"].(string)
+	}
+	functionName = strings.ToLower(functionName)
+	if functionName == "" {
+		return
+	}
+	// The scalar executor is matched by bare name only. remoteURILiteralValidator additionally inspects the
+	// catalog/schema fields to avoid rejecting a same-named user function; here there is no such thing to
+	// protect, because a user-defined function in the catalog already denies every query via the macro check.
+	if slices.Contains(nestedSQLTableExecutors[:], functionName) || functionName == nestedSQLScalarExecutor {
+		v.errs = append(v.errs, fmt.Errorf(
+			"%w: nested SQL executor '%s' is not allowed in a view body", ErrAccessDenied, functionName))
+	}
+}
+
+func (v *nestedSQLValidator) Validate() []error { return append([]error(nil), v.errs...) }
 
 // mirrorRootValidator refuses any path argument to a file-reading function that is not a single constant string
 // literal under root. It checks every function in the remote-read inventory, not just the two on the body's

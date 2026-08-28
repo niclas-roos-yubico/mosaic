@@ -226,13 +226,118 @@ func TestViewRecursionIsBounded(t *testing.T) {
 	}
 	conn := pinnedConn(t, f.db)
 
-	// CONTROL: a chain that stays within the bound is served, so the refusal below is the depth check and not
-	// nested views failing wholesale. v3 expands v3->v2->v1->v0, four expansions.
+	// The EXACT boundary, both sides. Asserting only "v5 is refused" leaves an off-by-one alive: moving the
+	// check to `depth > maxViewDepth` kept the whole suite green, because v3 still passed and v5 still failed.
+	// v3 expands v3->v2->v1->v0, four expansions, which is the last permitted chain; v4 is the first refused.
 	require.NoError(t, checkQuery(t, f.db, conn, `SELECT * FROM analytics.v3`))
 
-	err := checkQuery(t, f.db, conn, `SELECT * FROM analytics.v5`)
+	err := checkQuery(t, f.db, conn, `SELECT * FROM analytics.v4`)
 	require.ErrorIs(t, err, ErrAccessDenied)
 	require.Contains(t, err.Error(), "maximum view nesting depth")
+}
+
+// The body tier drops remoteURILiteralValidator, which was also what refused the nested SQL executors. The
+// function allowlist does not cover the gap: `query` is a name an operator may add with --function-allowlist,
+// and once it is inside a body the nested string is never parsed, so no validator here sees what it names.
+// Found in security review; before the fix this served a cross-schema read.
+func TestViewBodyCannotUseANestedSQLExecutor(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "mirror")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	db, connector := transactionTestDB(t,
+		WithMaxConnections(1),
+		WithResultCacheDisabled(),
+		// The operator flag that defeats the "not in the 864 defaults" argument.
+		WithFunctionAllowlist(FunctionAllowlistOptions{Include: []string{"query", "json_serialize_plan"}}),
+		WithTransactionalCatalogGuard(TransactionOptions{
+			Timeout: 30 * time.Second, MaxResultBytes: 8 << 20, MirrorFileRoot: root,
+		}))
+	f := mirrorFixture{t: t, db: db, connector: connector, root: root}
+	f.privileged(
+		`CREATE SCHEMA analytics`,
+		`CREATE SCHEMA private_ns`,
+		`CREATE TABLE private_ns.salaries(v INTEGER)`,
+		`INSERT INTO private_ns.salaries VALUES (999)`,
+		`CREATE VIEW analytics.nested AS SELECT * FROM query('SELECT * FROM private_ns.salaries')`,
+		`CREATE VIEW analytics.nested_scalar AS SELECT json_serialize_plan('SELECT * FROM private_ns.salaries') AS p`,
+	)
+
+	conn := pinnedConn(t, db)
+	for _, view := range []string{"analytics.nested", "analytics.nested_scalar"} {
+		err := checkQuery(t, db, conn, `SELECT * FROM `+view)
+		require.ErrorIs(t, err, ErrAccessDenied, view)
+		require.Contains(t, err.Error(), "nested SQL executor", view)
+	}
+}
+
+// cteScopeValidator is in the body set and is load-bearing there: baseTableValidator's CTE exemption is
+// scope-blind, so all three platform#8k4b decoy shapes let a bare out-of-root path through without it. Deleting
+// it from viewBodyValidators left the whole suite green, because the one test that covered the bare-literal
+// case asserted on "with empty schema" -- a message baseTableValidator also emits. These assert on the
+// scope-specific message, which only cteScopeValidator produces.
+func TestViewBodyCTEDecoyCannotSmuggleAFile(t *testing.T) {
+	f := newMirrorFixture(t, unsetRootSentinel)
+	decoy := f.outOfRoot
+	for name, body := range map[string]string{
+		"forward reference":            fmt.Sprintf(`WITH b AS (SELECT * FROM %q), %q AS (SELECT 1) SELECT * FROM b`, decoy, decoy),
+		"inner declaration":            fmt.Sprintf(`SELECT * FROM (WITH %q AS (SELECT 1) SELECT 1 AS z) a, %q b`, decoy, decoy),
+		"non-recursive self reference": fmt.Sprintf(`WITH %q AS (SELECT * FROM %q) SELECT * FROM %q`, decoy, decoy, decoy),
+	} {
+		t.Run(name, func(t *testing.T) {
+			view := "analytics.decoy"
+			f.privileged(fmt.Sprintf(`CREATE OR REPLACE VIEW %s AS %s`, view, body))
+			conn := pinnedConn(t, f.db)
+			err := checkQuery(t, f.db, conn, `SELECT * FROM `+view)
+			require.ErrorIs(t, err, ErrAccessDenied)
+			require.Contains(t, err.Error(), "no CTE of that name is in scope at this reference")
+		})
+	}
+}
+
+// The configured root must actually reach the validator. WithTransactionalCatalogGuard copies
+// TransactionOptions field by field, so a new field that nobody wires compiles clean and is silently dropped.
+func TestMirrorFileRootReachesTheGuard(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mirror")
+	db, _ := transactionTestDB(t,
+		WithMaxConnections(1),
+		WithResultCacheDisabled(),
+		WithFunctionAllowlist(FunctionAllowlistOptions{}),
+		WithTransactionalCatalogGuard(TransactionOptions{
+			Timeout: 30 * time.Second, MaxResultBytes: 8 << 20, MirrorFileRoot: root,
+		}))
+	require.Equal(t, root, db.transaction.MirrorFileRoot)
+	require.Equal(t, root+"/", db.mirrorFileRoot())
+}
+
+func TestValidateMirrorFileRootRejectsRootsThatBoundNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		root string
+		want string
+	}{
+		"unset is fine":     {root: "", want: ""},
+		"good local":        {root: "/srv/mirror", want: ""},
+		"good object store": {root: "gs://bucket/mirrors", want: ""},
+		"trailing slash":    {root: "gs://bucket/mirrors/", want: ""},
+		"glob":              {root: "/srv/mirror*", want: "glob metacharacters"},
+		"brace":             {root: "/srv/mirror{a,b}", want: "glob metacharacters"},
+		"filesystem root":   {root: "/", want: "must not be the filesystem root"},
+		"slashes only":      {root: "///", want: "must not be the filesystem root"},
+		"relative":          {root: "srv/mirror", want: "must be absolute"},
+		"traversal":         {root: "/srv/../mirror", want: "parent-directory segment"},
+		"bare bucket":       {root: "gs://bucket", want: "prefix below the bucket"},
+		"bucket slash":      {root: "gs://bucket/", want: "prefix below the bucket"},
+		"bare scheme":       {root: "gs://", want: "prefix below the bucket"},
+		"whitespace":        {root: " /srv/mirror", want: "leading or trailing whitespace"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateMirrorFileRoot(tc.root)
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 // A body may not evade the root check by computing its path. remoteURILiteralValidator scans for constants

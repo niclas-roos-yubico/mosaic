@@ -88,8 +88,10 @@ func (p *platformConfig) validate(schemaMatchHeadersStr, functionBlocklistStr st
 	// view is still refused, and a later flag change would quietly widen the boundary.
 	case *p.mirrorFileRoot != "" && !*p.enableExternalAccess:
 		reason = "--mirror-file-root requires --enable-external-access=true"
-	case strings.TrimSpace(*p.mirrorFileRoot) != *p.mirrorFileRoot:
-		reason = "--mirror-file-root must not have leading or trailing whitespace"
+		// The root's SHAPE is not checked here. query.validateGuardedOptions owns it, because a root that
+		// bounds nothing is a property of the root itself and the query package is what relies on it --
+		// duplicating the predicate here is how the two drift. New still runs before any resource is
+		// allocated, so a bad root is a boot failure either way.
 	case *p.transactionTimeout <= 0:
 		reason = "--query-transaction-timeout must be positive"
 	case *p.maxQueryResultBytes <= 0:

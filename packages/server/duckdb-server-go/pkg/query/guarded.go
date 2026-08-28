@@ -90,7 +90,8 @@ func validateGuardedOptions(o *Options) error {
 	if o.Transaction.MirrorFileRoot != "" && o.FunctionAllowlist == nil {
 		return errors.New("query: a mirror file root requires a configured function allowlist")
 	}
-	return nil
+	// A root that bounds nothing is worse than no root: it reads as configured. See validateMirrorFileRoot.
+	return validateMirrorFileRoot(o.Transaction.MirrorFileRoot)
 }
 
 // discardCacheIfDisabled is the body behind query.go's New() one-statement result-cache hook. Upstream constructs

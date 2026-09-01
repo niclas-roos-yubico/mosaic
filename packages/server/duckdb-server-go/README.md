@@ -150,9 +150,10 @@ flag to turn either off, and `--function-allowlist` only adds names on top of th
 -   *Guarded (`--enable-external-access=true`).* Required for Quack and for the BigQuery mirror deployment;
     requires `--disable-result-cache=true`. Every `json`/`arrow` request runs on one physical connection,
     inside one transaction: validation (`system.main.json_serialize_sql`) as the first statement after
-    `BeginTx`; then a live catalog check — every referenced relation must resolve to a physical table in
-    that same snapshot, and the catalog must contain no user-defined macro; then execution; then full
-    materialization into a bounded in-memory buffer. Only a successful commit of all of that releases any
+    `BeginTx`; then a live catalog check — every referenced application relation must resolve to a physical
+    table or an admitted mirror view in that same snapshot. Authorized `information_schema` relations are
+    admitted as DuckDB system views. The catalog must contain no user-defined macro; then execution; then
+    full materialization into a bounded in-memory buffer. Only a successful commit of all of that releases any
     byte to the HTTP or WebSocket client; a timeout, cancellation, oversized result, or failed commit rolls
     back and discards the connection instead of returning it to the pool.
 

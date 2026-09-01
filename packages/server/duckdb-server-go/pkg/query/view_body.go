@@ -83,6 +83,12 @@ func (db *DB) checkRelationsOn(
 		}
 		visited[ref] = struct{}{}
 
+		// DuckDB exposes information_schema relations as system views, not user-authored catalog objects.
+		// The AST schema validator has already required information_schema in the caller's allowed schemas.
+		if ref.SchemaName == "information_schema" {
+			continue
+		}
+
 		value, err := scalarOn(ctx, conn, `
 			SELECT coalesce(max(table_type), 'ABSENT')
 			FROM system.information_schema.tables

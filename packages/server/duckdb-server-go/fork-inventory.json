@@ -35,6 +35,7 @@
     "pkg/query/limited_buffer.go",
     "pkg/query/limited_buffer_test.go",
     "pkg/query/options_fork_test.go",
+    "pkg/query/system_relation_fork_test.go",
     "pkg/query/transaction.go",
     "pkg/query/transaction_test.go",
     "pkg/query/validate_on.go",

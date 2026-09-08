@@ -242,8 +242,8 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodPost:
-		body := limitQueryBody(w, r)                                              // FORK[http-query-body]: apply the route cap before any decoder reads the body.
-		err := decodeHTTPParams(r.Context(), body, &params, resolution.ExpiresAt) // FORK[http-expiry-context]: body admission must end with the resolved authorization.
+		body := limitQueryBody(w, r)                                                 // FORK[http-query-body]: apply the route cap before any decoder reads the body.
+		err := decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt) // FORK[http-expiry-context]: body admission must end with the resolved authorization.
 		if errors.Is(err, errHTTPAuthorizationExpired) {
 			s.writeHTTPError(w, resolutionExpiryError())
 			return

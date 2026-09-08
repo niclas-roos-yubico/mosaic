@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,12 +23,18 @@ type expiryTestBody struct {
 	io.Reader
 	until     time.Time
 	closed    chan struct{}
+	readStart chan struct{}
 	readDone  chan struct{}
 	closeOnce sync.Once
+	startOnce sync.Once
+	readOnce  sync.Once
 }
 
 func (b *expiryTestBody) Read(p []byte) (int, error) {
-	defer close(b.readDone)
+	defer b.readOnce.Do(func() { close(b.readDone) })
+	if b.readStart != nil {
+		b.startOnce.Do(func() { close(b.readStart) })
+	}
 	if delay := time.Until(b.until); delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -99,6 +107,57 @@ func TestHTTPExpiryRejectsBodyCompletingAfterResolution(t *testing.T) {
 	case <-body.readDone:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("request-body reader was not unblocked at authorization expiry")
+	}
+}
+
+func TestHTTPExpiryInterruptsPartialNetworkBody(t *testing.T) {
+	executor := &expiryTestExecutor{}
+	h := mustHandler(t, executor, WithSchemaResolver(SchemaResolverFunc(func(*http.Request) (SchemaResolution, error) {
+		return SchemaResolution{AllowedSchemas: []string{"tenant"}, ExpiresAt: time.Now().Add(60 * time.Millisecond)}, nil
+	})))
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(srv.URL, "http://"), time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	started := time.Now()
+	_, err = fmt.Fprintf(conn, "POST / HTTP/1.1\r\nHost: expiry.test\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"type\":")
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+
+	require.Equal(t, http.StatusUnauthorized, response.StatusCode)
+	require.Zero(t, executor.callCount())
+	require.Less(t, time.Since(started), 500*time.Millisecond)
+}
+
+func TestHTTPBodyDecodeStopsOnRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	body := &expiryTestBody{
+		Reader: strings.NewReader(`{"type":"json","sql":"SELECT 1"}`),
+		until:  time.Now().Add(time.Second), closed: make(chan struct{}), readStart: make(chan struct{}), readDone: make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		var params queryParams
+		done <- decodeHTTPParams(ctx, httptest.NewRecorder(), body, &params, time.Time{})
+	}()
+	select {
+	case <-body.readStart:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("request-body decoder did not start")
+	}
+	cancel()
+
+	require.ErrorIs(t, <-done, context.Canceled)
+	select {
+	case <-body.readDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("request-body reader was not unblocked by request cancellation")
 	}
 }
 

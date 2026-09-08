@@ -75,7 +75,7 @@ var pkgServerHookCode = []struct {
 		"command execution is bounded by the plain network ctx, so a query outlives the session expiry"},
 	{"server.go", "http-expiry-context", "contextForResolution(r.Context(), resolution.ExpiresAt)", 1,
 		"HTTP body decoding and command execution outlive the resolved authorization expiry"},
-	{"server.go", "http-expiry-context", "decodeHTTPParams(r.Context(), body, &params, resolution.ExpiresAt)", 1,
+	{"server.go", "http-expiry-context", "decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt)", 1,
 		"HTTP body decoding ignores the resolved authorization expiry"},
 	{"server.go", "http-expiry-context", "response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]", 1,
 		"HTTP command execution ignores the resolved authorization expiry"},

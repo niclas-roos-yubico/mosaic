@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"time"
@@ -28,7 +27,6 @@ func resolutionExpiryError() error {
 func decodeHTTPParams(ctx context.Context, body io.ReadCloser, params *queryParams, expiresAt time.Time) error {
 	decodeCtx, decodeCancel := contextForResolution(context.WithoutCancel(ctx), expiresAt)
 	defer decodeCancel()
-	ctx = decodeCtx
 
 	pipeReader, pipeWriter := io.Pipe()
 	go func() {
@@ -42,7 +40,7 @@ func decodeHTTPParams(ctx context.Context, body io.ReadCloser, params *queryPara
 
 	decodeDone := make(chan error, 1)
 	go func() {
-		decodeDone <- json.NewDecoder(pipeReader).Decode(params)
+		decodeDone <- decodeQueryBody(pipeReader, params)
 	}()
 
 	select {
@@ -50,16 +48,12 @@ func decodeHTTPParams(ctx context.Context, body io.ReadCloser, params *queryPara
 		_ = body.Close()
 		_ = pipeReader.Close()
 		return err
-	case <-ctx.Done():
+	case <-decodeCtx.Done():
 		_ = body.Close()
-		_ = pipeReader.CloseWithError(ctx.Err())
-		err := <-decodeDone
+		_ = pipeReader.CloseWithError(decodeCtx.Err())
 		if resolutionExpired(expiresAt) {
 			return errHTTPAuthorizationExpired
 		}
-		if err != nil {
-			return err
-		}
-		return ctx.Err()
+		return decodeCtx.Err()
 	}
 }

@@ -44,6 +44,8 @@
     "pkg/query/writer_test.go",
     "pkg/server/errors_fork_test.go",
     "pkg/server/fork_source_test.go",
+    "pkg/server/http_expiry.go",
+    "pkg/server/http_expiry_fork_test.go",
     "pkg/server/schema_resolver.go",
     "pkg/server/schema_resolver_test.go",
     "pkg/server/websocket_session.go"
@@ -148,6 +150,11 @@
       "slug": "http-request-schemas",
       "file": "pkg/server/server.go",
       "why": "http handler must use the resolver rather than headers. MARKER HAZARD: same standalone-marker shape as ws-request-schemas, and this is the weaker of the two -- reverting the code to getAllowedSchemas compiles, so only the suite (not the compiler) turns it red. pkg/server/fork_source_test.go pins the call count at 2 so reverting one handler and not the other is red on its own terms RULE-4 EXCEPTION: same three-statement shape as ws-request-schemas."
+    },
+    {
+      "slug": "http-expiry-context",
+      "file": "pkg/server/server.go",
+      "why": "HTTP body decoding and command execution must be bounded by the resolved authorization expiry; the explicit context parameter keeps the lifetime visible to every execution path"
     },
     {
       "slug": "exec-schema-policy-gate",

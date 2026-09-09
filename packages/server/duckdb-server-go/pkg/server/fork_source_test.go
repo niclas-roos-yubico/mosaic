@@ -12,8 +12,9 @@ import (
 
 // Source guard for pkg/server's hooks, the same pattern platform_test.go applies to main.go.
 //
-// Measured 2026-08-27 by deleting each hook and running `go build -tags=duckdb_arrow ./...`
-// then the full suite:
+// The original hooks were measured 2026-08-27 by deleting each one, building, and
+// running the full suite. The 2026-09-08 HTTP hooks are pinned by the same source
+// guard and their focused regressions:
 //
 //	config-schema-resolver          build fails
 //	handler-schema-resolver-field   build fails
@@ -22,12 +23,14 @@ import (
 //	ws-session-bounds               build fails (queryCtx unbound)
 //	ws-message-query-ctx            builds, suite red
 //	http-request-schemas            builds, suite red
+//	http-expiry-context             builds, suite red
+//	http-query-body                 builds, suite red
 //	exec-schema-policy-gate         builds, suite red
 //	guarded-error-mapping           builds, suite red (errors_fork_test.go)
 //
 // So unlike main.go, no pkg/server hook's *code* can be lost silently -- every one is caught by
 // the compiler or by an existing test. What can still be lost silently is the marker: two of the
-// nine sit on their own line above the statement, so a resolution can drop the comment and leave
+// eleven sit on their own line above the statement, so a resolution can drop the comment and leave
 // working code with no inventory trail. TestPkgServerRetainsLoadBearingHookCode therefore pins the
 // code as well as the marker, so neither half can disappear on its own.
 
@@ -44,6 +47,8 @@ var pkgServerSlugs = map[string][]string{
 		"ws-session-bounds",
 		"ws-message-query-ctx",
 		"http-request-schemas",
+		"http-expiry-context",
+		"http-query-body",
 		"exec-schema-policy-gate",
 	},
 	"options.go": {"config-schema-resolver"},
@@ -66,10 +71,20 @@ var pkgServerHookCode = []struct {
 		"a handler derives allowed schemas from request headers instead of the validated session JWT"},
 	{"server.go", "ws-session-bounds", "s.beginWebSocketSession(", 1,
 		"the websocket session's expiry close, query deadline and single-source close"},
-	{"server.go", "ws-message-query-ctx", "s.execCommand(queryCtx,", 1,
+	{"server.go", "ws-message-query-ctx", "s.execCommand(queryCtx,", 2,
 		"command execution is bounded by the plain network ctx, so a query outlives the session expiry"},
+	{"server.go", "http-expiry-context", "contextForResolution(r.Context(), resolution.ExpiresAt)", 1,
+		"HTTP body decoding and command execution outlive the resolved authorization expiry"},
+	{"server.go", "http-expiry-context", "decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt)", 1,
+		"HTTP body decoding ignores the resolved authorization expiry"},
+	{"server.go", "http-expiry-context", "response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]", 1,
+		"HTTP command execution ignores the resolved authorization expiry"},
+	{"server.go", "http-expiry-context", "resolutionExpired(resolution.ExpiresAt)", 2,
+		"HTTP can execute after expiry or return a result completed after expiry"},
 	{"server.go", "exec-schema-policy-gate", "if s.schemaResolver != nil {", 1,
 		"exec-denial gate 3; in platform mode schemaMatchHeaders is empty, so upstream's own gate does not fire and exec is re-enabled"},
+	{"server.go", "http-query-body", "limitQueryBody(w, r)", 1,
+		"POST query requests bypass the bounded single-document decoder and can allocate unbounded bodies"},
 	{"errors.go", "guarded-error-mapping", "query.ErrResultTooLarge", 1,
 		"byte-cap and deadline hits are classified as a generic bad_request"},
 }

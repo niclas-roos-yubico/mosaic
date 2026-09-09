@@ -506,3 +506,12 @@ golangci-lint run
 ### Update Dependencies
 
 Update dependencies with `go get -u` and then run `go mod tidy` to clean up the `go.mod` file.
+
+### HTTP request bounds
+
+The POST query endpoint accepts at most `MaxQueryBodyBytes` (1 MiB) and requires
+exactly one JSON document. The decoder applies the cap while reading, including
+chunked requests without `Content-Length`, and returns HTTP 413 when the cap is
+exhausted; malformed or trailing JSON returns HTTP 400. WebSocket messages use
+their existing framing and session-expiry controls. The platform listener owns
+public HTTP read/header/idle timeout policy.

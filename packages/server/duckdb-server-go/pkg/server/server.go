@@ -235,15 +235,21 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPError(w, err)
 		return
 	}
+	queryCtx, queryCancel := contextForResolution(r.Context(), resolution.ExpiresAt) // FORK[http-expiry-context]: bound body decoding and execution by the resolved authorization lifetime.
+	defer queryCancel()
 
 	var params queryParams
 
 	switch r.Method {
 	case http.MethodPost:
-		err := json.NewDecoder(r.Body).Decode(&params)
+		body := limitQueryBody(w, r)                                                 // FORK[http-query-body]: apply the route cap before any decoder reads the body.
+		err := decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt) // FORK[http-expiry-context]: body admission must end with the resolved authorization.
+		if errors.Is(err, errHTTPAuthorizationExpired) {
+			s.writeHTTPError(w, resolutionExpiryError())
+			return
+		}
 		if err != nil {
-			s.logger.Error("server: failed to decode request body", "error", err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeQueryBodyError(w, err)
 			return
 		}
 
@@ -267,9 +273,18 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := s.execCommand(r.Context(), params, allowedSchemas, authorize)
+	if resolutionExpired(resolution.ExpiresAt) { // FORK[http-expiry-context]: decoding success does not imply authorization is still live.
+		s.writeHTTPError(w, resolutionExpiryError())
+		return
+	}
+
+	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]: bound every executor path by authorization expiry.
 	if err != nil {
 		s.writeHTTPError(w, err)
+		return
+	}
+	if resolutionExpired(resolution.ExpiresAt) { // FORK[http-expiry-context]: buffered late success must not reach the client.
+		s.writeHTTPError(w, resolutionExpiryError())
 		return
 	}
 

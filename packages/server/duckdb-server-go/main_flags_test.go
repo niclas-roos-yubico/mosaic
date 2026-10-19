@@ -1,7 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +14,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/duckdb/duckdb-go/v2"
+	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jwt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -137,6 +147,106 @@ func TestBinaryBootsInDefaultMode(t *testing.T) {
 		"default mode must reject an unauthenticated request, not merely start; server log:\n%s", serverLog())
 }
 
+func TestBinaryStrictDatasetPolicyRejectsLegacySchemaSession(t *testing.T) {
+	binary := buildTestBinary(t)
+	private, jwksHandler := processTestKey(t)
+	jwks := httptest.NewServer(jwksHandler)
+	t.Cleanup(jwks.Close)
+
+	dbPath := filepath.Join(t.TempDir(), "dataset.duckdb")
+	connector, err := duckdb.NewConnector(dbPath, nil)
+	require.NoError(t, err)
+	db := sql.OpenDB(connector)
+	_, err = db.Exec(`CREATE SCHEMA sales; CREATE TABLE sales.secret_orders(id INTEGER, label VARCHAR); INSERT INTO sales.secret_orders VALUES (1, 'denied')`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	require.NoError(t, connector.Close())
+
+	port := freePort(t)
+	cmd := exec.Command(binary,
+		"--database="+dbPath,
+		"--address=127.0.0.1",
+		"--port="+port,
+		"--platform-session-jwks-url="+jwks.URL,
+		"--platform-jwt-iss=https://platform.example.com/platform",
+		"--platform-jwt-alg=RS256",
+		"--require-dataset-policy=true",
+	)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	require.NoError(t, cmd.Start())
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	client := &http.Client{Timeout: time.Second}
+	var resp *http.Response
+	for range 100 {
+		resp, err = client.Post("http://127.0.0.1:"+port+"/", "application/json", strings.NewReader(`{"type":"json","sql":"SELECT * FROM sales.secret_orders"}`))
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	// The first request above is intentionally unauthenticated and only waits for readiness.
+
+	token := processLegacyToken(t, private)
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+port+"/", strings.NewReader(`{"type":"json","sql":"SELECT * FROM sales.secret_orders"}`))
+	require.NoError(t, err)
+	req.Header.Set("X-Platform-Session", token)
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func processTestKey(t *testing.T) (*rsa.PrivateKey, http.Handler) {
+	t.Helper()
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	public, err := jwk.PublicRawKeyOf(private)
+	require.NoError(t, err)
+	key, err := jwk.Import(public)
+	require.NoError(t, err)
+	_ = key.Set(jwk.KeyIDKey, "process-test-kid")
+	_ = key.Set(jwk.AlgorithmKey, jwa.RS256())
+	_ = key.Set(jwk.KeyUsageKey, jwk.ForSignature)
+	set := jwk.NewSet()
+	require.NoError(t, set.AddKey(key))
+	return private, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(set)
+	})
+}
+
+func processLegacyToken(t *testing.T, private *rsa.PrivateKey) string {
+	t.Helper()
+	now := time.Now()
+	token := jwt.New()
+	for key, value := range map[string]any{
+		jwt.IssuerKey:     "https://platform.example.com/platform",
+		jwt.AudienceKey:   []string{"platform-data-plane"},
+		jwt.SubjectKey:    "process-test-user",
+		jwt.IssuedAtKey:   now,
+		jwt.NotBeforeKey:  now,
+		jwt.ExpirationKey: now.Add(time.Minute),
+		jwt.JwtIDKey:      "process-test-jti",
+		"allowed_schemas": []string{"sales"},
+	} {
+		require.NoError(t, token.Set(key, value))
+	}
+	key, err := jwk.Import(private)
+	require.NoError(t, err)
+	_ = key.Set(jwk.KeyIDKey, "process-test-kid")
+	_ = key.Set(jwk.AlgorithmKey, jwa.RS256())
+	signed, err := jwt.Sign(token, jwt.WithKey(jwa.RS256(), key))
+	require.NoError(t, err)
+	return string(signed)
+}
+
 // freePort asks the kernel for an unused port and immediately gives it back. Racy in principle;
 // the alternative is parsing the listener address out of the subprocess's log, which is more code
 // for a narrower guarantee.
@@ -156,7 +266,7 @@ func TestUsageAdvertisesHardenedFlags(t *testing.T) {
 		"platform-session-jwks-url", "platform-jwt-iss", "platform-jwt-alg",
 		"enable-external-access", "disable-result-cache", "query-transaction-timeout",
 		"max-query-result-bytes", "quack-bootstrap-fd", "function-allowlist",
-		"load-extension-file",
+		"load-extension-file", "require-dataset-policy",
 	} {
 		require.Contains(t, output, flag)
 	}

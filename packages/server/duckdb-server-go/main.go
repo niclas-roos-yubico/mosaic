@@ -140,8 +140,8 @@ func run() int {
 
 	s, err := server.New(db,
 		server.WithSchemaMatchHeaders(schemaMatchHeaders...),
-		server.WithAuthorizer(platformauth.Authorizer()),         // FORK[exec-denial-authorizer]: gate 1 of three; denies CommandExec outright
-		server.WithSchemaResolver(platformauth.SchemaResolver()), // FORK[exec-denial-schema-resolver]: gate 2 of three; arms the schema-policy guard in pkg/server's execCommand
+		server.WithAuthorizer(platformauth.Authorizer()),                                       // FORK[exec-denial-authorizer]: gate 1 of three; denies CommandExec outright
+		server.WithSchemaResolver(platformauth.SchemaResolver(*platform.requireDatasetPolicy)), // FORK[exec-denial-schema-resolver]: gate 2 of three; arms the schema-policy guard in pkg/server's execCommand and rejects legacy sessions in strict dataset mode
 		server.WithLogger(logger),
 		server.WithCORS(server.CORSOptions{
 			AllowAllOrigins: true,

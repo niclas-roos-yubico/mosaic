@@ -11,6 +11,7 @@
     "extension_files_integration_fork_test.go",
     "extension_init.go",
     "extension_init_test.go",
+    "DATASET_ACCESS.md",
     "main_flags_test.go",
     "platform.go",
     "platform_quack_allowlist_fork_test.go",

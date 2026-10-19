@@ -20,6 +20,8 @@ The policy expiry is bounded by the JWT expiry. The platform minter uses the
 same second-truncated expiry for both values. The gateway obtains these fields
 from the authorizer and publication resolver; clients cannot choose a mirror
 ID, version, binding revision, schema, table, or prefix.
+Clients send no credentials or storage credentials; the gateway supplies the
+attested session and trusted relation bindings.
 
 Production dataset mode must start the binary with
 `--require-dataset-policy=true`. This rejects legacy schema-only sessions. The

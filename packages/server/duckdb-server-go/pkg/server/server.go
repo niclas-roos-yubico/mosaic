@@ -132,6 +132,10 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPError(w, err)
 		return
 	}
+	if resolution.RelationPolicy != nil {
+		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		return
+	}
 	allowedSchemas := resolution.AllowedSchemas
 	if len(s.schemaMatchHeaders) > 0 && len(allowedSchemas) == 0 {
 		s.logger.Error("server: no allowed schemas found in request headers", "headers", s.schemaMatchHeaders)
@@ -191,7 +195,7 @@ func (s *handler) handleWebSocketMessage(ctx, queryCtx context.Context, conn *we
 
 	// FORK[ws-message-query-ctx]: bound query execution (and its authorization)
 	// by the resolved session expiry via queryCtx, not the plain network ctx.
-	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize)
+	response, err := s.execCommand(queryCtx /* websocket session */, params, allowedSchemas, authorize)
 	if err != nil {
 		errResponse := s.classifyAndLogError(err)
 		writeErr := wsjson.Write(ctx, conn, map[string]string{
@@ -278,7 +282,8 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]: bound every executor path by authorization expiry.
+	// response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]: the policy-aware call below retains this expiry-bound execution hook.
+	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy) // FORK[http-expiry-context]: bound every executor path by authorization expiry.
 	if err != nil {
 		s.writeHTTPError(w, err)
 		return
@@ -302,7 +307,7 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSchemas []string, authorize CommandAuthorizer) (commandResponse, error) {
+func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSchemas []string, authorize CommandAuthorizer, policies ...*query.RelationPolicy) (commandResponse, error) {
 	if err := params.Validate(s.logger); err != nil {
 		return commandResponse{}, err
 	}
@@ -319,6 +324,19 @@ func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSc
 	useCache := false
 	if params.Persist != nil {
 		useCache = *params.Persist
+	}
+	var policyExecutor relationPolicyExecutor
+	if len(policies) > 1 {
+		return commandResponse{}, errors.New("server: multiple relation policies")
+	}
+	// FORK[http-expiry-context]: dataset mode must use the policy-aware executor so its expiry and exact bindings
+	// reach the guarded query path; it cannot fall back to schema-only execution.
+	if len(policies) == 1 && policies[0] != nil {
+		var ok bool
+		policyExecutor, ok = s.db.(relationPolicyExecutor)
+		if !ok {
+			return commandResponse{}, &authorizationError{err: ErrPermissionDenied}
+		}
 	}
 
 	switch command.Type() {
@@ -337,10 +355,18 @@ func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSc
 		err = s.db.Exec(ctx, command.SQL())
 
 	case CommandArrow:
-		response.data, response.cacheHit, err = s.db.QueryArrow(ctx, command.SQL(), allowedSchemas, useCache)
+		if policyExecutor != nil {
+			response.data, response.cacheHit, err = policyExecutor.QueryArrowWithPolicy(ctx, command.SQL(), *policies[0])
+		} else {
+			response.data, response.cacheHit, err = s.db.QueryArrow(ctx, command.SQL(), allowedSchemas, useCache)
+		}
 
 	case CommandJSON:
-		response.data, response.cacheHit, err = s.db.QueryJSON(ctx, command.SQL(), allowedSchemas, useCache)
+		if policyExecutor != nil {
+			response.data, response.cacheHit, err = policyExecutor.QueryJSONWithPolicy(ctx, command.SQL(), *policies[0])
+		} else {
+			response.data, response.cacheHit, err = s.db.QueryJSON(ctx, command.SQL(), allowedSchemas, useCache)
+		}
 
 	default:
 		return commandResponse{}, fmt.Errorf("server: no executor for command type %q", command.Type())

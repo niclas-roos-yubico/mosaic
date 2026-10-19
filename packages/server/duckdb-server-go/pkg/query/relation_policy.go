@@ -160,16 +160,28 @@ type relationPrefixValidator struct {
 }
 
 func (v *relationPrefixValidator) CheckNode(node map[string]any, _ []string) {
-	if node["type"] != "TABLE_FUNCTION" {
+	switch node["type"] {
+	case "BASE_TABLE":
+		v.errs = append(v.errs, fmt.Errorf("%w: mirror view contains an additional base relation", ErrAccessDenied))
+		return
+	case "TABLE_FUNCTION":
+		break
+	default:
 		return
 	}
 	function, ok := node["function"].(map[string]any)
 	if !ok {
+		v.errs = append(v.errs, fmt.Errorf("%w: mirror view contains a malformed table function", ErrAccessDenied))
 		return
 	}
 	name, _ := function["function_name"].(string)
-	pathArguments, ok := remoteread.Lookup(strings.ToLower(name))
+	if strings.ToLower(name) != "read_parquet" {
+		v.errs = append(v.errs, fmt.Errorf("%w: mirror view contains unsupported table function '%s'", ErrAccessDenied, name))
+		return
+	}
+	pathArguments, ok := remoteread.Lookup("read_parquet")
 	if !ok {
+		v.errs = append(v.errs, fmt.Errorf("%w: read_parquet is not registered as a path reader", ErrAccessDenied))
 		return
 	}
 	children, ok := function["children"].([]any)

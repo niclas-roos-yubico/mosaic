@@ -122,6 +122,8 @@ func TestQueryOptionsGateOnTheirFlags(t *testing.T) {
 		"external-access mode must never serve a cached, pre-authorization result")
 	require.NotNil(t, options.Transaction,
 		"external-access mode must run every query under the transactional catalog guard")
+	require.NotNil(t, options.Transaction.BindingVerifier,
+		"external-access mode must install the live mirror binding verifier")
 	require.Equal(t, 30*time.Second, options.Transaction.Timeout,
 		"the guard's deadline must come from --query-transaction-timeout")
 	require.Equal(t, int64(64<<20), options.Transaction.MaxResultBytes,

@@ -117,6 +117,21 @@ func TestCTEScopeAgainstProductionValidatorSet(t *testing.T) {
 			`SELECT (WITH "private_data" AS (SELECT 1 AS z) SELECT z) AS x FROM private_data`,
 			true,
 		},
+		{
+			"CTE in an EXISTS subquery does not exempt the outer FROM",
+			`SELECT * FROM private_data WHERE EXISTS (WITH private_data AS (SELECT 1) SELECT * FROM private_data)`,
+			true,
+		},
+		{
+			"quoted mixed-case CTE in an EXISTS subquery does not exempt the outer FROM",
+			`SELECT * FROM private_data WHERE EXISTS (WITH "PRIVATE_DATA" AS (SELECT 1) SELECT * FROM "PRIVATE_DATA")`,
+			true,
+		},
+		{
+			"quoted outer table remains denied across an inner case-folded CTE",
+			`SELECT * FROM "PRIVATE_DATA" WHERE EXISTS (WITH "private_data" AS (SELECT 1) SELECT * FROM "private_data")`,
+			true,
+		},
 		// --- ordering inside one WITH. Measured on DuckDB: a CTE is NOT visible to a WITH item declared
 		// before it, and NOT visible inside its own body unless the item is RECURSIVE. Both of those
 		// references bind to the real table, so scoping that ignored order would leave the hole open.

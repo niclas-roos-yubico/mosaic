@@ -27,6 +27,7 @@ type platformConfig struct {
 	disableResultCache   *bool
 	transactionTimeout   *time.Duration
 	maxQueryResultBytes  *int64
+	requireDatasetPolicy *bool
 	quackBootstrapFD     *int
 	extensionFiles       *extensionFileFlag
 	mirrorFileRoot       *string
@@ -49,6 +50,7 @@ func registerPlatformFlags() *platformConfig {
 		disableResultCache:   flag.Bool("disable-result-cache", false, "Disable the server-side persisted SQL result cache"),
 		transactionTimeout:   flag.Duration("query-transaction-timeout", 30*time.Second, "Maximum guarded query duration including pool wait and materialization"),
 		maxQueryResultBytes:  flag.Int64("max-query-result-bytes", 64<<20, "Maximum encoded JSON or Arrow response bytes"),
+		requireDatasetPolicy: flag.Bool("require-dataset-policy", false, "Reject legacy schema-only session JWTs on ordinary HTTP requests"),
 		quackBootstrapFD:     flag.Int("quack-bootstrap-fd", -1, "Inherited descriptor carrying versioned Quack bootstrap config; -1 disables"),
 		mirrorFileRoot:       flag.String("mirror-file-root", "", "Prefix a platform-authored VIEW body may read Parquet from, e.g. gs://bucket/mirrors. Empty refuses every view; requires --enable-external-access=true"),
 	}
@@ -145,7 +147,7 @@ func (p *platformConfig) queryOptions(allowlistInclude []string) []query.OptionF
 	if *p.enableExternalAccess {
 		options = append(options, query.WithTransactionalCatalogGuard(query.TransactionOptions{
 			Timeout: *p.transactionTimeout, MaxResultBytes: *p.maxQueryResultBytes,
-			MirrorFileRoot: *p.mirrorFileRoot,
+			MirrorFileRoot: *p.mirrorFileRoot, BindingVerifier: query.MirrorBindingVerifier,
 		}))
 	}
 	return options

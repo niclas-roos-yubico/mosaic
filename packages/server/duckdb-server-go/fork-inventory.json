@@ -34,6 +34,8 @@
     "pkg/query/guarded.go",
     "pkg/query/limited_buffer.go",
     "pkg/query/limited_buffer_test.go",
+	"pkg/query/relation_policy.go",
+	"pkg/query/relation_policy_fork_test.go",
     "pkg/query/options_fork_test.go",
     "pkg/query/system_relation_fork_test.go",
     "pkg/query/transaction.go",
@@ -48,6 +50,7 @@
     "pkg/server/http_expiry_fork_test.go",
     "pkg/server/request_body.go",
     "pkg/server/request_body_fork_test.go",
+	"pkg/server/relation_policy.go",
     "pkg/server/schema_resolver.go",
     "pkg/server/schema_resolver_test.go",
     "pkg/server/websocket_session.go"

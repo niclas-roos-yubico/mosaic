@@ -5,9 +5,13 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/functionset/remoteread"
 )
 
 var ErrPolicyExpired = errors.New("query: authorization policy expired")
@@ -18,10 +22,12 @@ var ErrPolicyExpired = errors.New("query: authorization policy expired")
 // connection before execution.
 type AuthorizedRelation struct {
 	DatasetID       string
+	MirrorID        string
 	BindingRevision string
 	DataVersion     string
 	SchemaName      string
 	TableName       string
+	Prefix          string
 }
 
 // RelationPolicy is the per-request authorization snapshot for public Mosaic
@@ -52,8 +58,8 @@ func (p RelationPolicy) validate(now time.Time) error {
 	}
 	seen := make(map[string]struct{}, len(p.Bindings))
 	for _, binding := range p.Bindings {
-		if binding.DatasetID == "" || binding.BindingRevision == "" || binding.DataVersion == "" ||
-			binding.SchemaName == "" || binding.TableName == "" {
+		if binding.DatasetID == "" || binding.MirrorID == "" || binding.BindingRevision == "" || binding.DataVersion == "" ||
+			binding.SchemaName == "" || binding.TableName == "" || binding.Prefix == "" {
 			return fmt.Errorf("%w: incomplete relation binding", ErrAccessDenied)
 		}
 		key := binding.SchemaName + "\x00" + binding.TableName
@@ -78,6 +84,130 @@ func (p RelationPolicy) schemas() []string {
 }
 
 func (p RelationPolicy) Schemas() []string { return p.schemas() }
+
+// MirrorBindingVerifier is the production verifier for dataset-policy queries.
+// It runs on the guarded query connection so the mirror version and prefix
+// cannot change between validation and execution. The gateway supplies these
+// values from the trusted dataset registry; clients never choose them.
+func MirrorBindingVerifier(ctx context.Context, conn driver.Conn, policy RelationPolicy) error {
+	for _, binding := range policy.Bindings {
+		version, err := strconv.ParseInt(binding.DataVersion, 10, 64)
+		if err != nil || version < 0 {
+			return fmt.Errorf("%w: invalid mirror version for dataset %s", ErrAccessDenied, binding.DatasetID)
+		}
+		value, err := scalarOn(ctx, conn, `
+			SELECT count(*)::BIGINT
+			FROM bqsync_internal.mirror_state
+			WHERE import_id = ? AND version = ? AND prefix = ?`,
+			driver.NamedValue{Ordinal: 1, Value: binding.MirrorID},
+			driver.NamedValue{Ordinal: 2, Value: version},
+			driver.NamedValue{Ordinal: 3, Value: binding.Prefix},
+		)
+		if err != nil {
+			return fmt.Errorf("%w: mirror binding lookup for dataset %s: %v", ErrAccessDenied, binding.DatasetID, err)
+		}
+		count, ok := value.(int64)
+		if !ok || count != 1 {
+			return fmt.Errorf("%w: mirror binding is no longer current for dataset %s", ErrAccessDenied, binding.DatasetID)
+		}
+		if err := verifyMirrorViewOn(ctx, conn, binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyMirrorViewOn binds the authorized target relation to the exact
+// version-scoped Parquet prefix recorded in the policy. mirror_state alone is
+// insufficient: a stale catalog view can still point at another live mirror
+// while the expected mirror row remains current. Reading duckdb_views and
+// parsing the stored body on the guarded connection closes that catalog-swap
+// race without trusting client SQL or path text.
+func verifyMirrorViewOn(ctx context.Context, conn driver.Conn, binding AuthorizedRelation) error {
+	value, err := scalarOn(ctx, conn, `
+		SELECT CASE WHEN count(*) = 1 THEN max(sql) END
+		FROM system.main.duckdb_views()
+		WHERE database_name = system.main.current_database()
+		  AND internal = false
+		  AND schema_name = ? AND view_name = ?`,
+		driver.NamedValue{Ordinal: 1, Value: binding.SchemaName},
+		driver.NamedValue{Ordinal: 2, Value: binding.TableName})
+	if err != nil {
+		return fmt.Errorf("%w: target relation lookup failed for dataset %s: %v", ErrAccessDenied, binding.DatasetID, err)
+	}
+	stored, ok := value.(string)
+	if !ok || stored == "" {
+		return fmt.Errorf("%w: target relation %s.%s is not a platform-authored view", ErrAccessDenied, binding.SchemaName, binding.TableName)
+	}
+	body, err := viewBodyFromStoredSQL(stored)
+	if err != nil {
+		return fmt.Errorf("%w: target relation %s.%s has an invalid view definition: %v", ErrAccessDenied, binding.SchemaName, binding.TableName, err)
+	}
+	validator := &relationPrefixValidator{expected: strings.TrimRight(binding.Prefix, "/") + "/*.parquet"}
+	if err := validateSQLOn(ctx, conn, body, validator); err != nil {
+		return fmt.Errorf("%w: target relation %s.%s could not be validated: %v", ErrAccessDenied, binding.SchemaName, binding.TableName, err)
+	}
+	if validator.seen != 1 {
+		return fmt.Errorf("%w: target relation %s.%s must read exactly one authorized mirror prefix", ErrAccessDenied, binding.SchemaName, binding.TableName)
+	}
+	return nil
+}
+
+type relationPrefixValidator struct {
+	expected string
+	seen     int
+	errs     []error
+}
+
+func (v *relationPrefixValidator) CheckNode(node map[string]any, _ []string) {
+	if node["type"] != "TABLE_FUNCTION" {
+		return
+	}
+	function, ok := node["function"].(map[string]any)
+	if !ok {
+		return
+	}
+	name, _ := function["function_name"].(string)
+	pathArguments, ok := remoteread.Lookup(strings.ToLower(name))
+	if !ok {
+		return
+	}
+	children, ok := function["children"].([]any)
+	if !ok {
+		return
+	}
+	positional := 0
+	for _, child := range children {
+		argument, ok := child.(map[string]any)
+		if !ok {
+			continue
+		}
+		if alias, named := argument["alias"].(string); named && alias != "" {
+			if slices.Contains(pathArguments.Named, strings.ToLower(alias)) {
+				v.checkPath(argument, name)
+			}
+			continue
+		}
+		if slices.Contains(pathArguments.Positional, positional) {
+			v.checkPath(argument, name)
+		}
+		positional++
+	}
+}
+
+func (v *relationPrefixValidator) checkPath(argument map[string]any, functionName string) {
+	literal, ok := constantStringLiteral(argument)
+	if !ok {
+		v.errs = append(v.errs, fmt.Errorf("%w: path argument to '%s' is not a single constant literal", ErrAccessDenied, functionName))
+		return
+	}
+	v.seen++
+	if literal != v.expected {
+		v.errs = append(v.errs, fmt.Errorf("%w: path argument to '%s' is not the authorized mirror prefix", ErrAccessDenied, functionName))
+	}
+}
+
+func (v *relationPrefixValidator) Validate() []error { return append([]error(nil), v.errs...) }
 
 func stringsFromSet(values map[string]struct{}) []string {
 	result := make([]string, 0, len(values))
@@ -165,46 +295,20 @@ func (db *DB) QueryJSONWithPolicy(ctx context.Context, statement string, policy 
 	if err := policy.validate(time.Now()); err != nil {
 		return nil, false, err
 	}
-	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, statement, policy.schemas(), responseJSON, policy)
-		return data, false, err
+	if db.transaction == nil || db.transaction.BindingVerifier == nil {
+		return nil, false, fmt.Errorf("%w: relation policy requires the guarded transaction and binding verifier", ErrAccessDenied)
 	}
-	policyCtx, cancel := context.WithDeadline(ctx, policy.ValidUntil)
-	defer cancel()
-	if err := db.validatePolicy(policyCtx, statement, policy); err != nil {
-		return nil, false, err
-	}
-	var buf []byte
-	var builder strings.Builder
-	if err := db.writeJSON(policyCtx, statement, &builder); err != nil {
-		return nil, false, err
-	}
-	buf = []byte(builder.String())
-	if !time.Now().Before(policy.ValidUntil) {
-		return nil, false, ErrPolicyExpired
-	}
-	return buf, false, nil
+	data, err := db.executeGuarded(ctx, statement, policy.schemas(), responseJSON, policy)
+	return data, false, err
 }
 
 func (db *DB) QueryArrowWithPolicy(ctx context.Context, statement string, policy RelationPolicy) ([]byte, bool, error) {
 	if err := policy.validate(time.Now()); err != nil {
 		return nil, false, err
 	}
-	if db.transaction != nil {
-		data, err := db.executeGuarded(ctx, statement, policy.schemas(), responseArrow, policy)
-		return data, false, err
+	if db.transaction == nil || db.transaction.BindingVerifier == nil {
+		return nil, false, fmt.Errorf("%w: relation policy requires the guarded transaction and binding verifier", ErrAccessDenied)
 	}
-	policyCtx, cancel := context.WithDeadline(ctx, policy.ValidUntil)
-	defer cancel()
-	if err := db.validatePolicy(policyCtx, statement, policy); err != nil {
-		return nil, false, err
-	}
-	var builder strings.Builder
-	if err := db.writeArrow(policyCtx, statement, &builder); err != nil {
-		return nil, false, err
-	}
-	if !time.Now().Before(policy.ValidUntil) {
-		return nil, false, ErrPolicyExpired
-	}
-	return []byte(builder.String()), false, nil
+	data, err := db.executeGuarded(ctx, statement, policy.schemas(), responseArrow, policy)
+	return data, false, err
 }

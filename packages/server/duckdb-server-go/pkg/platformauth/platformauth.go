@@ -6,9 +6,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/lestrrat-go/jwx/v3/jwt"
 
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/server"
 )
 
@@ -136,18 +138,39 @@ func claimsFromRequest(r *http.Request) (*SessionClaims, bool) {
 // rejected the request), no claims are present in the context and
 // ResolveSchemas returns server.ErrUnauthenticated rather than an
 // empty-but-successful resolution.
-func SchemaResolver() server.SchemaResolver {
+func SchemaResolver(requireDatasetPolicy ...bool) server.SchemaResolver {
+	strict := len(requireDatasetPolicy) > 0 && requireDatasetPolicy[0]
 	return server.SchemaResolverFunc(func(r *http.Request) (server.SchemaResolution, error) {
 		claims, ok := claimsFromRequest(r)
 		if !ok {
 			return server.SchemaResolution{}, server.ErrUnauthenticated
 		}
-		return server.SchemaResolution{
+		if strict && claims.DatasetPolicy == nil {
+			return server.SchemaResolution{}, server.ErrPermissionDenied
+		}
+		resolution := server.SchemaResolution{
 			// Copy rather than alias claims.AllowedSchemas so callers cannot
 			// mutate the backing array shared with the validated claims.
 			AllowedSchemas: append([]string(nil), claims.AllowedSchemas...),
 			ExpiresAt:      claims.ExpiresAt,
-		}, nil
+		}
+		if claims.DatasetPolicy != nil {
+			bindings := make([]query.AuthorizedRelation, 0, len(claims.DatasetPolicy.Datasets))
+			for _, dataset := range claims.DatasetPolicy.Datasets {
+				bindings = append(bindings, query.AuthorizedRelation{
+					DatasetID: dataset.DatasetID, MirrorID: dataset.MirrorID,
+					BindingRevision: strconv.FormatInt(dataset.BindingRevision, 10),
+					DataVersion:     strconv.FormatInt(dataset.DataVersion, 10),
+					SchemaName:      dataset.TargetSchema, TableName: dataset.TargetTable,
+					Prefix: dataset.Prefix,
+				})
+			}
+			policy := query.RelationPolicy{ContextID: claims.DatasetPolicy.ContextID, ValidUntil: claims.DatasetPolicy.ValidUntil, Bindings: bindings}
+			resolution.RelationPolicy = &policy
+			resolution.AllowedSchemas = policy.Schemas()
+			resolution.ExpiresAt = claims.DatasetPolicy.ValidUntil
+		}
+		return resolution, nil
 	})
 }
 

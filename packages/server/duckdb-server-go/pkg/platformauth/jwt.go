@@ -44,10 +44,30 @@ var (
 type SessionClaims struct {
 	Sub            string
 	AllowedSchemas []string
+	DatasetPolicy  *DatasetPolicyClaims
 	Issuer         string
 	Audience       string
 	ExpiresAt      time.Time
 	JTI            string
+}
+
+// DatasetPolicyClaims is the signed, exact-relation authorization snapshot
+// minted by the platform gateway. MirrorID and Prefix are trusted registry
+// values; they are checked again by Mosaic on its transaction connection.
+type DatasetPolicyClaims struct {
+	ContextID  string                 `json:"context_id"`
+	ValidUntil time.Time              `json:"valid_until"`
+	Datasets   []DatasetBindingClaims `json:"datasets"`
+}
+
+type DatasetBindingClaims struct {
+	DatasetID       string `json:"dataset_id"`
+	MirrorID        string `json:"mirror_id"`
+	BindingRevision int64  `json:"binding_revision"`
+	DataVersion     int64  `json:"data_version"`
+	TargetSchema    string `json:"target_schema"`
+	TargetTable     string `json:"target_table"`
+	Prefix          string `json:"prefix"`
 }
 
 // JWTValidatorConfig configures the JWT validator.
@@ -346,23 +366,52 @@ func (v *JWTValidator) parseAndValidate(ctx context.Context, tokenStr string, ke
 		return nil, fmt.Errorf("%w 'exp'", errMissingClaim)
 	}
 
-	// Extract allowed_schemas.
+	// Extract the optional exact-relation dataset policy. New public dataset
+	// requests use this claim and do not need the legacy schema-only claim.
+	var datasetPolicy *DatasetPolicyClaims
+	if tok.Has("dataset_policy") {
+		var rawPolicy interface{}
+		if getErr := tok.Get("dataset_policy", &rawPolicy); getErr != nil {
+			return nil, fmt.Errorf("jwt: could not read 'dataset_policy': %w", getErr)
+		}
+		encoded, marshalErr := json.Marshal(rawPolicy)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("jwt: 'dataset_policy' invalid: %w", marshalErr)
+		}
+		var parsed DatasetPolicyClaims
+		if unmarshalErr := json.Unmarshal(encoded, &parsed); unmarshalErr != nil {
+			return nil, fmt.Errorf("jwt: 'dataset_policy' invalid: %w", unmarshalErr)
+		}
+		if err := parsed.validate(expiresAt); err != nil {
+			return nil, err
+		}
+		datasetPolicy = &parsed
+	}
+
+	// Extract allowed_schemas for legacy/internal sessions. Dataset-policy
+	// sessions derive schemas from their exact relation bindings instead.
 	// In jwx/v3.1.1, Get(key, &dst) writes into dst and returns error.
 	// After JSON round-trip, a []string private claim comes back as []interface{}.
-	if !tok.Has("allowed_schemas") {
+	if datasetPolicy == nil && !tok.Has("allowed_schemas") {
 		return nil, fmt.Errorf("%w 'allowed_schemas'", errMissingClaim)
 	}
 	var rawSchemas interface{}
-	if getErr := tok.Get("allowed_schemas", &rawSchemas); getErr != nil {
-		return nil, fmt.Errorf("jwt: could not read 'allowed_schemas': %w", getErr)
+	if datasetPolicy == nil {
+		if getErr := tok.Get("allowed_schemas", &rawSchemas); getErr != nil {
+			return nil, fmt.Errorf("jwt: could not read 'allowed_schemas': %w", getErr)
+		}
 	}
 
-	allowedSchemas, convErr := toStringSlice(rawSchemas)
-	if convErr != nil {
-		return nil, fmt.Errorf("jwt: 'allowed_schemas' invalid: %w", convErr)
-	}
-	if len(allowedSchemas) == 0 {
-		return nil, fmt.Errorf("jwt: 'allowed_schemas' is empty")
+	var allowedSchemas []string
+	if datasetPolicy == nil {
+		var convErr error
+		allowedSchemas, convErr = toStringSlice(rawSchemas)
+		if convErr != nil {
+			return nil, fmt.Errorf("jwt: 'allowed_schemas' invalid: %w", convErr)
+		}
+		if len(allowedSchemas) == 0 {
+			return nil, fmt.Errorf("jwt: 'allowed_schemas' is empty")
+		}
 	}
 
 	// Extract issuer and audience for SessionClaims.
@@ -376,11 +425,31 @@ func (v *JWTValidator) parseAndValidate(ctx context.Context, tokenStr string, ke
 	return &SessionClaims{
 		Sub:            sub,
 		AllowedSchemas: allowedSchemas,
+		DatasetPolicy:  datasetPolicy,
 		Issuer:         iss,
 		Audience:       aud,
 		JTI:            jti,
 		ExpiresAt:      expiresAt,
 	}, nil
+}
+
+func (p DatasetPolicyClaims) validate(tokenExpiry time.Time) error {
+	if p.ContextID == "" || p.ValidUntil.IsZero() || !p.ValidUntil.Before(tokenExpiry.Add(time.Nanosecond)) || len(p.Datasets) == 0 {
+		return fmt.Errorf("jwt: invalid dataset_policy bounds")
+	}
+	seen := make(map[string]struct{}, len(p.Datasets))
+	for _, dataset := range p.Datasets {
+		if dataset.DatasetID == "" || dataset.MirrorID == "" || dataset.BindingRevision < 0 || dataset.DataVersion < 0 ||
+			dataset.TargetSchema == "" || dataset.TargetTable == "" || dataset.Prefix == "" {
+			return fmt.Errorf("jwt: invalid dataset_policy binding")
+		}
+		key := dataset.TargetSchema + "\x00" + dataset.TargetTable
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("jwt: duplicate dataset_policy relation")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 // toStringSlice converts an interface{} that is either []string or []interface{}

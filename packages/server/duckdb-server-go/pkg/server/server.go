@@ -132,6 +132,7 @@ func (s *handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPError(w, err)
 		return
 	}
+	// FORK[dataset-policy-websocket-denial]: policy-bound dataset access is REST-only at the gateway.
 	if resolution.RelationPolicy != nil {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
@@ -282,6 +283,7 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FORK[dataset-policy-http-routing]: pass the trusted relation policy to the guarded executor.
 	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy) // FORK[http-expiry-context]: bound every executor path by authorization expiry.
 	if err != nil {
 		s.writeHTTPError(w, err)
@@ -328,7 +330,7 @@ func (s *handler) execCommand(ctx context.Context, params queryParams, allowedSc
 	if len(policies) > 1 {
 		return commandResponse{}, errors.New("server: multiple relation policies")
 	}
-	// FORK[http-expiry-context]: dataset mode must use the policy-aware executor so its expiry and exact bindings
+	// FORK[dataset-policy-http-routing]: dataset mode must use the policy-aware executor so its expiry and exact bindings
 	// reach the guarded query path; it cannot fall back to schema-only execution.
 	if len(policies) == 1 && policies[0] != nil {
 		var ok bool

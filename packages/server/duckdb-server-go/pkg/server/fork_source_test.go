@@ -49,9 +49,11 @@ var pkgServerSlugs = map[string][]string{
 		"ws-request-schemas",
 		"ws-session-bounds",
 		"ws-message-query-ctx",
+		"dataset-policy-websocket-denial",
 		"http-request-schemas",
 		"http-expiry-context",
 		"http-query-body",
+		"dataset-policy-http-routing",
 		"exec-schema-policy-gate",
 	},
 	"options.go": {"config-schema-resolver"},
@@ -74,6 +76,10 @@ var pkgServerHookCode = []struct {
 		"a handler derives allowed schemas from request headers instead of the validated session JWT"},
 	{"server.go", "ws-session-bounds", "s.beginWebSocketSession(", 1,
 		"the websocket session's expiry close, query deadline and single-source close"},
+	{"server.go", "dataset-policy-http-routing", "policyExecutor.QueryArrowWithPolicy(ctx, command.SQL(), *policies[0])", 1,
+		"a dataset-policy Arrow request falls back to schema-only execution"},
+	{"server.go", "dataset-policy-http-routing", "policyExecutor.QueryJSONWithPolicy(ctx, command.SQL(), *policies[0])", 1,
+		"a dataset-policy JSON request falls back to schema-only execution"},
 	{"server.go", "http-expiry-context", "contextForResolution(r.Context(), resolution.ExpiresAt)", 1,
 		"HTTP body decoding and command execution outlive the resolved authorization expiry"},
 	{"server.go", "http-expiry-context", "decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt)", 1,
@@ -130,6 +136,16 @@ func TestPkgServerRetainsLiveExpiryBoundExecutions(t *testing.T) {
 		"the HTTP executor must receive the expiry-bounded context and relation policy")
 }
 
+func TestPkgServerRetainsLiveDatasetPolicyRoutes(t *testing.T) {
+	source := readForkSource(t, "server.go")
+	require.Equal(t, 1, directWebSocketDatasetPolicyDenials(t, source),
+		"a dataset-policy session must be rejected before WebSocket upgrade")
+
+	http := directExecCommandCalls(t, source, "handleHTTP")
+	require.Equal(t, [][]string{{"queryCtx", "params", "allowedSchemas", "authorize", "resolution.RelationPolicy"}}, callArguments(http),
+		"the HTTP handler must directly pass the trusted relation policy to its executor")
+}
+
 func TestDirectExecCommandCallsIgnoreNonLiveCalls(t *testing.T) {
 	for name, source := range map[string]string{
 		"comment": `package server
@@ -155,6 +171,39 @@ func (s *handler) handleHTTP() {
 		t.Run(name, func(t *testing.T) {
 			require.Empty(t, directExecCommandCalls(t, source, "handleHTTP"),
 				"a %s execution call must not satisfy the direct handler assignment guard", name)
+		})
+	}
+}
+
+func TestDirectWebSocketDatasetPolicyDenialsIgnoreNonLiveGuards(t *testing.T) {
+	for name, source := range map[string]string{
+		"comment": `package server
+func (s *handler) handleWebSocket() {
+	// if resolution.RelationPolicy != nil { http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound); return }
+}`,
+		"dead branch": `package server
+func (s *handler) handleWebSocket() {
+	if false {
+		if resolution.RelationPolicy != nil {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+			return
+		}
+	}
+}`,
+		"uninvoked closure": `package server
+func (s *handler) handleWebSocket() {
+	reject := func() {
+		if resolution.RelationPolicy != nil {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+			return
+		}
+	}
+	_ = reject
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Zero(t, directWebSocketDatasetPolicyDenials(t, source),
+				"a %s WebSocket rejection guard must not satisfy the direct handler guard", name)
 		})
 	}
 }
@@ -192,6 +241,57 @@ func isExecCommandCall(call *ast.CallExpr) bool {
 	}
 	receiver, ok := selector.X.(*ast.Ident)
 	return ok && receiver.Name == "s"
+}
+
+func directWebSocketDatasetPolicyDenials(t *testing.T, source string) int {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "server.go", source, 0)
+	require.NoError(t, err)
+
+	denials := 0
+	for _, declaration := range file.Decls {
+		declaration, ok := declaration.(*ast.FuncDecl)
+		if !ok || declaration.Name.Name != "handleWebSocket" {
+			continue
+		}
+		for _, statement := range declaration.Body.List {
+			if isWebSocketDatasetPolicyDenial(statement) {
+				denials++
+			}
+		}
+	}
+	return denials
+}
+
+func isWebSocketDatasetPolicyDenial(statement ast.Stmt) bool {
+	guard, ok := statement.(*ast.IfStmt)
+	if !ok || guard.Else != nil || !isDatasetPolicyCondition(guard.Cond) || len(guard.Body.List) != 2 {
+		return false
+	}
+	return isNotFoundHTTPError(guard.Body.List[0]) && isBareReturn(guard.Body.List[1])
+}
+
+func isDatasetPolicyCondition(condition ast.Expr) bool {
+	binary, ok := condition.(*ast.BinaryExpr)
+	return ok && binary.Op == token.NEQ && expressionPath(binary.X) == "resolution.RelationPolicy" && expressionPath(binary.Y) == "nil"
+}
+
+func isNotFoundHTTPError(statement ast.Stmt) bool {
+	expression, ok := statement.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expression.X.(*ast.CallExpr)
+	if !ok || expressionPath(call.Fun) != "http.Error" || len(call.Args) != 3 || expressionPath(call.Args[0]) != "w" || expressionPath(call.Args[2]) != "http.StatusNotFound" {
+		return false
+	}
+	statusText, ok := call.Args[1].(*ast.CallExpr)
+	return ok && expressionPath(statusText.Fun) == "http.StatusText" && len(statusText.Args) == 1 && expressionPath(statusText.Args[0]) == "http.StatusNotFound"
+}
+
+func isBareReturn(statement ast.Stmt) bool {
+	result, ok := statement.(*ast.ReturnStmt)
+	return ok && len(result.Results) == 0
 }
 
 func callArguments(calls []ast.CallExpr) [][]string {

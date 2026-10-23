@@ -53,6 +53,20 @@ func TestMiddlewareStoresClaimsForResolver(t *testing.T) {
 	require.False(t, expiresAt.IsZero())
 }
 
+func TestStrictSchemaResolverRejectsLegacySchemaOnlySession(t *testing.T) {
+	v, token := testValidator(t)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := platformauth.SchemaResolver(true).ResolveSchemas(r)
+		require.ErrorIs(t, err, server.ErrPermissionDenied)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/data/", nil)
+	req.Header.Set(platformauth.SessionHeader, token)
+	res := httptest.NewRecorder()
+	platformauth.Middleware(v, slog.Default())(next).ServeHTTP(res, req)
+	require.Equal(t, http.StatusNoContent, res.Code)
+}
+
 func TestMiddlewareRejectsMissingToken(t *testing.T) {
 	v, _ := testValidator(t)
 	called := false

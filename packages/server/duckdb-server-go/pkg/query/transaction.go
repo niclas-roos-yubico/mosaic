@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // responseFormat distinguishes the two encodings executeGuarded can produce, so it can select the right encoder
@@ -110,7 +111,18 @@ func watchTransaction(ctx context.Context, guard *txGuard) (*atomic.Bool, func()
 // Ordering above is the security property: validation must be the first statement after BeginTx, catalog
 // authorization must precede any cache read, and the response must be committed before any byte reaches the
 // client.
-func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []string, format responseFormat) ([]byte, error) {
+func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []string, format responseFormat, policies ...RelationPolicy) ([]byte, error) {
+	policy := RelationPolicy{}
+	if len(policies) > 1 {
+		return nil, fmt.Errorf("query: at most one relation policy is permitted")
+	}
+	if len(policies) == 1 {
+		policy = policies[0]
+		if err := policy.validate(time.Now()); err != nil {
+			return nil, err
+		}
+		schemas = policy.schemas()
+	}
 	// I3: newValidators (query.go) only installs the base-table validator when len(allowedSchemas) > 0, so an
 	// empty schemas here would leave only the function allowlist, URI-literal rejection, and the catalog's
 	// physical-table check active -- none of which asks "is this schema authorized?" -- and checkCatalogOn would
@@ -123,12 +135,20 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 	}
 
 	guardCtx, cancel := context.WithTimeout(ctx, db.transaction.Timeout)
+	if !policy.ValidUntil.IsZero() {
+		guardCtx, cancel = context.WithDeadline(ctx, minTime(time.Now().Add(db.transaction.Timeout), policy.ValidUntil))
+	}
 	defer cancel()
 
 	// Cheap load-shedding validation uses sql.DB before Arrow acquisition. This deliberately runs before any
 	// pool acquisition below: db.db must never be touched again once a pooledArrowConn is held, or a pool-size-one
 	// deployment can deadlock a request against itself.
-	if err := db.validateQuery(guardCtx, statement, schemas); err != nil {
+	if err := func() error {
+		if len(policies) == 1 {
+			return db.validatePolicy(guardCtx, statement, policy)
+		}
+		return db.validateQuery(guardCtx, statement, schemas)
+	}(); err != nil {
 		return nil, normalizeGuardError(guardCtx, err)
 	}
 
@@ -176,11 +196,20 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 	}()
 
 	// FIRST statement after BEGIN: this pins the DuckDB snapshot. Nothing may run on pc.conn before this.
-	refs, err := db.validateQueryOn(guardCtx, pc.conn, statement, schemas)
+	var refs []tableRef
+	if len(policies) == 1 {
+		refs, err = db.validatePolicyOn(guardCtx, pc.conn, statement, policy)
+	} else {
+		refs, err = db.validateQueryOn(guardCtx, pc.conn, statement, schemas)
+	}
 	if err != nil {
 		return nil, normalizeGuardError(guardCtx, err)
 	}
-	if err := db.checkCatalogOn(guardCtx, pc.conn, refs, schemas); err != nil {
+	if len(policies) == 1 {
+		if err := db.checkCatalogOn(guardCtx, pc.conn, refs, schemas, policy); err != nil {
+			return nil, normalizeGuardError(guardCtx, err)
+		}
+	} else if err := db.checkCatalogOn(guardCtx, pc.conn, refs, schemas); err != nil {
 		return nil, normalizeGuardError(guardCtx, err)
 	}
 
@@ -208,6 +237,9 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 		return nil, normalizeGuardError(guardCtx, err)
 	}
 
+	if len(policies) == 1 && !time.Now().Before(policy.ValidUntil) {
+		return nil, ErrPolicyExpired
+	}
 	committed, err := guard.commit()
 	if err != nil {
 		// A failed commit leaves the connection in an unknown state: discard it rather than returning it to the
@@ -227,6 +259,13 @@ func (db *DB) executeGuarded(ctx context.Context, statement string, schemas []st
 	// Copy out of buffer before it (and the pooledArrowConn's Arrow-backed memory it was filled from) can be
 	// reused: the caller must not retain any reference into pool-owned state.
 	return append([]byte(nil), buffer.Bytes()...), nil
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 func normalizeGuardError(ctx context.Context, err error) error {

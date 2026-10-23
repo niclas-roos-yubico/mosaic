@@ -36,6 +36,8 @@ type TransactionOptions struct {
 	// package did before. It lives here rather than on Options because a view body is only ever resolved inside
 	// the guarded transaction, so a root without the guard would configure a check that never runs.
 	MirrorFileRoot string
+
+	BindingVerifier RelationBindingVerifier
 }
 
 // guardedJSON, guardedArrow and writeGuarded are the bodies behind query.go's four route hooks. They are methods on

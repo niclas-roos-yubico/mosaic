@@ -133,9 +133,10 @@ func WithRemoteURILiteralRejection() OptionFunc {
 func WithTransactionalCatalogGuard(options TransactionOptions) OptionFunc {
 	return func(opts *Options) error {
 		opts.Transaction = &TransactionOptions{
-			Timeout:        options.Timeout,
-			MaxResultBytes: options.MaxResultBytes,
-			MirrorFileRoot: options.MirrorFileRoot,
+			Timeout:         options.Timeout,
+			MaxResultBytes:  options.MaxResultBytes,
+			MirrorFileRoot:  options.MirrorFileRoot,
+			BindingVerifier: options.BindingVerifier,
 		}
 		return nil
 	}

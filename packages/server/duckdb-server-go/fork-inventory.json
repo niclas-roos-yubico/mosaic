@@ -11,6 +11,7 @@
     "extension_files_integration_fork_test.go",
     "extension_init.go",
     "extension_init_test.go",
+    "DATASET_ACCESS.md",
     "main_flags_test.go",
     "platform.go",
     "platform_quack_allowlist_fork_test.go",
@@ -34,6 +35,8 @@
     "pkg/query/guarded.go",
     "pkg/query/limited_buffer.go",
     "pkg/query/limited_buffer_test.go",
+	"pkg/query/relation_policy.go",
+	"pkg/query/relation_policy_fork_test.go",
     "pkg/query/options_fork_test.go",
     "pkg/query/system_relation_fork_test.go",
     "pkg/query/transaction.go",
@@ -48,6 +51,7 @@
     "pkg/server/http_expiry_fork_test.go",
     "pkg/server/request_body.go",
     "pkg/server/request_body_fork_test.go",
+	"pkg/server/relation_policy.go",
     "pkg/server/schema_resolver.go",
     "pkg/server/schema_resolver_test.go",
     "pkg/server/websocket_session.go"
@@ -144,6 +148,11 @@
       "why": "websocket handler must use the resolver rather than headers. MARKER HAZARD: the marker sits on its own line above the statement (a standalone comment is correct here -- this is not an aligned block), so a resolution can drop the comment and leave working code with no inventory trail. Reverting the code itself fails the build, because resolution feeds beginWebSocketSession; pkg/server/fork_source_test.go pins both halves RULE-4 EXCEPTION: three statements including an `if err != nil` body. Upstream's single getAllowedSchemas call has no error path, so the resolver's cannot be additive; requestSchemas in fork-owned schema_resolver.go already holds everything that could move."
     },
     {
+      "slug": "dataset-policy-websocket-denial",
+      "file": "pkg/server/server.go",
+      "why": "dataset-policy sessions belong only to the gateway REST route; this guard must reject them before the upstream WebSocket upgrade. RULE-4 EXCEPTION: the rejection writes the stable not-found response then returns, and cannot move to a fork-owned wrapper because the upstream handler owns the upgrade. fork_source_test.go requires this exact top-level guard and rejects comment, dead-branch, and uninvoked-closure mutations."
+    },
+    {
       "slug": "ws-message-query-ctx",
       "file": "pkg/server/server.go",
       "why": "message handler needs both the network ctx and the expiry-bounded query ctx"
@@ -157,6 +166,11 @@
       "slug": "http-expiry-context",
       "file": "pkg/server/server.go",
       "why": "HTTP body decoding and command execution must be bounded by the resolved authorization expiry; the explicit context and repeated marker keep admission, execution and buffered-result checks visible. ADDITIVE REJECTED: upstream decodes and executes directly in handleHTTP, so each lifecycle site must be changed. RULE-4 EXCEPTION: the pre- and post-execution expiry guards return before stale work runs or stale output is written."
+    },
+    {
+      "slug": "dataset-policy-http-routing",
+      "file": "pkg/server/server.go",
+      "why": "the resolved relation policy must cross the upstream HTTP executor seam and select the guarded policy-aware JSON or Arrow query path. It cannot be fork-owned because handleHTTP and execCommand own dispatch; fork_source_test.go requires the direct HTTP call, both policy executors, and rejects comment, dead-branch, and uninvoked-closure mutations."
     },
     {
       "slug": "http-query-body",

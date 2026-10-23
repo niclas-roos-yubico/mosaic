@@ -50,9 +50,20 @@ func scalarOn(ctx context.Context, conn driver.Conn, statement string, args ...d
 // checkCatalogOn authorizes the live catalog behind the references a query touched, on the connection and
 // transaction the query was validated on. allowedSchemas is threaded through because a VIEW's body is validated
 // under the CALLER's schema bound; see checkRelationsOn in view_body.go, which owns the per-relation decision.
-func (db *DB) checkCatalogOn(ctx context.Context, conn driver.Conn, refs []tableRef, allowedSchemas []string) error {
+func (db *DB) checkCatalogOn(ctx context.Context, conn driver.Conn, refs []tableRef, allowedSchemas []string, policies ...RelationPolicy) error {
 	if err := db.checkRelationsOn(ctx, conn, refs, allowedSchemas, 0, make(map[tableRef]struct{})); err != nil {
 		return err
+	}
+	if len(policies) > 1 {
+		return fmt.Errorf("query: at most one relation policy is permitted")
+	}
+	if len(policies) == 1 {
+		if db.transaction.BindingVerifier == nil {
+			return fmt.Errorf("%w: relation binding verifier is not configured", ErrAccessDenied)
+		}
+		if err := db.transaction.BindingVerifier(ctx, conn, policies[0]); err != nil {
+			return fmt.Errorf("%w: relation binding is no longer current: %w", ErrAccessDenied, err)
+		}
 	}
 	value, err := scalarOn(ctx, conn, `
 		SELECT count(*)::BIGINT FROM duckdb_functions()

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/niclas-roos-yubico/mosaic/packages/server/duckdb-server-go/pkg/query"
 )
 
 var errNilSchemaResolver = errors.New("server: schema resolver must not be nil")
@@ -14,6 +16,7 @@ var errNilSchemaResolver = errors.New("server: schema resolver must not be nil")
 type SchemaResolution struct {
 	AllowedSchemas []string
 	ExpiresAt      time.Time
+	RelationPolicy *query.RelationPolicy
 }
 
 // SchemaResolver resolves the schemas a request is permitted to access. It is
@@ -57,8 +60,16 @@ func (s *handler) requestSchemas(r *http.Request) (SchemaResolution, error) {
 	if err != nil {
 		return SchemaResolution{}, &authorizationError{err: err}
 	}
+	if resolution.RelationPolicy != nil && len(resolution.AllowedSchemas) == 0 {
+		resolution.AllowedSchemas = resolution.RelationPolicy.Schemas()
+	}
 	if len(resolution.AllowedSchemas) == 0 {
 		return SchemaResolution{}, &authorizationError{err: ErrUnauthenticated}
+	}
+	if resolution.RelationPolicy != nil {
+		if err := resolution.RelationPolicy.Validate(); err != nil {
+			return SchemaResolution{}, &authorizationError{err: err}
+		}
 	}
 
 	return resolution, nil

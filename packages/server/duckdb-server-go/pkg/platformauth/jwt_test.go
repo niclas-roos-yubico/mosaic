@@ -110,6 +110,53 @@ func TestValidToken(t *testing.T) {
 	}
 }
 
+func TestValidDatasetPolicyTokenDoesNotNeedSchemaFallback(t *testing.T) {
+	priv, jwksHandler := genTestKey(t)
+	srv := httptest.NewServer(jwksHandler)
+	defer srv.Close()
+	v, err := platformauth.NewJWTValidator(platformauth.JWTValidatorConfig{
+		JWKSURL: srv.URL, Issuer: "https://platform.example.com/platform",
+		Audience: "platform-data-plane", Algorithms: []string{"RS256"},
+	})
+	if err != nil {
+		t.Fatalf("NewJWTValidator: %v", err)
+	}
+	now := time.Now()
+	tok := jwt.New()
+	_ = tok.Set(jwt.IssuerKey, "https://platform.example.com/platform")
+	_ = tok.Set(jwt.AudienceKey, []string{"platform-data-plane"})
+	_ = tok.Set(jwt.SubjectKey, "user123")
+	_ = tok.Set(jwt.IssuedAtKey, now)
+	_ = tok.Set(jwt.NotBeforeKey, now)
+	_ = tok.Set(jwt.ExpirationKey, now.Add(5*time.Minute))
+	_ = tok.Set(jwt.JwtIDKey, "jti-dataset-policy")
+	_ = tok.Set("dataset_policy", map[string]any{
+		"context_id": "ctx-1", "valid_until": now.Add(2 * time.Minute),
+		"datasets": []map[string]any{{
+			"dataset_id": "dataset-1", "mirror_id": "mirror-1", "binding_revision": int64(2),
+			"data_version": int64(7), "target_schema": "analytics", "target_table": "orders",
+			"prefix": "mirror/prefix-a",
+		}},
+	})
+	privKey, _ := jwk.Import(priv)
+	_ = privKey.Set(jwk.KeyIDKey, "test-kid-1")
+	_ = privKey.Set(jwk.AlgorithmKey, jwa.RS256())
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.RS256(), privKey))
+	if err != nil {
+		t.Fatalf("jwt.Sign: %v", err)
+	}
+	claims, err := v.Validate(context.Background(), string(signed))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if claims.DatasetPolicy == nil || len(claims.DatasetPolicy.Datasets) != 1 {
+		t.Fatalf("dataset policy = %#v", claims.DatasetPolicy)
+	}
+	if got := claims.DatasetPolicy.Datasets[0].Prefix; got != "mirror/prefix-a" {
+		t.Fatalf("prefix = %q", got)
+	}
+}
+
 func TestExpiredToken(t *testing.T) {
 	priv, jwksHandler := genTestKey(t)
 	srv := httptest.NewServer(jwksHandler)

@@ -122,6 +122,8 @@ func TestQueryOptionsGateOnTheirFlags(t *testing.T) {
 		"external-access mode must never serve a cached, pre-authorization result")
 	require.NotNil(t, options.Transaction,
 		"external-access mode must run every query under the transactional catalog guard")
+	require.NotNil(t, options.Transaction.BindingVerifier,
+		"external-access mode must install the live mirror binding verifier")
 	require.Equal(t, 30*time.Second, options.Transaction.Timeout,
 		"the guard's deadline must come from --query-transaction-timeout")
 	require.Equal(t, int64(64<<20), options.Transaction.MaxResultBytes,
@@ -184,7 +186,7 @@ var mainGoHookCode = []struct {
 	{"external-access-latch", "platform.latchExternalAccess(", "the external-access latch; DuckDB external access stays on in default mode"},
 	{"quack-bootstrap", "startQuackIfConfigured(", "the Quack bootstrap; quack_serve never runs, the mirror deployment has no Quack listener, and nothing is logged"},
 	{"exec-denial-authorizer", "platformauth.Authorizer()", "exec-denial gate 1"},
-	{"exec-denial-schema-resolver", "platformauth.SchemaResolver()", "exec-denial gate 2, which also flips pkg/server's CommandExec guard false and re-enables exec"},
+	{"exec-denial-schema-resolver", "platformauth.SchemaResolver(*platform.requireDatasetPolicy)", "exec-denial gate 2 and strict dataset-policy rejection for legacy sessions"},
 	{"session-middleware", "platformauth.Middleware(", "platform-session JWT validation on every request"},
 }
 

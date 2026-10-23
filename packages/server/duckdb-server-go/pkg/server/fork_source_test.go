@@ -121,25 +121,45 @@ func TestPkgServerRetainsLoadBearingHookCode(t *testing.T) {
 func TestPkgServerRetainsLiveExpiryBoundExecutions(t *testing.T) {
 	source := readForkSource(t, "server.go")
 
-	websocket := liveExecCommandCalls(t, source, "handleWebSocketMessage")
+	websocket := directExecCommandCalls(t, source, "handleWebSocketMessage")
 	require.Equal(t, [][]string{{"queryCtx", "params", "allowedSchemas", "authorize"}}, callArguments(websocket),
 		"the WebSocket executor must receive the expiry-bounded query context")
 
-	http := liveExecCommandCalls(t, source, "handleHTTP")
+	http := directExecCommandCalls(t, source, "handleHTTP")
 	require.Equal(t, [][]string{{"queryCtx", "params", "allowedSchemas", "authorize", "resolution.RelationPolicy"}}, callArguments(http),
 		"the HTTP executor must receive the expiry-bounded context and relation policy")
 }
 
-func TestLiveExecCommandCallsIgnoreComments(t *testing.T) {
-	const source = `package server
+func TestDirectExecCommandCallsIgnoreNonLiveCalls(t *testing.T) {
+	for name, source := range map[string]string{
+		"comment": `package server
 func (s *handler) handleHTTP() {
 	// s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy)
-}`
-	require.Empty(t, liveExecCommandCalls(t, source, "handleHTTP"),
-		"a commented execution call must not satisfy the source guard")
+}`,
+		"dead branch": `package server
+func (s *handler) handleHTTP() {
+	if false {
+		response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy)
+		_, _ = response, err
+	}
+}`,
+		"uninvoked closure": `package server
+func (s *handler) handleHTTP() {
+	deferred := func() {
+		response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy)
+		_, _ = response, err
+	}
+	_ = deferred
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Empty(t, directExecCommandCalls(t, source, "handleHTTP"),
+				"a %s execution call must not satisfy the direct handler assignment guard", name)
+		})
+	}
 }
 
-func liveExecCommandCalls(t *testing.T, source, function string) []ast.CallExpr {
+func directExecCommandCalls(t *testing.T, source, function string) []ast.CallExpr {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "server.go", source, 0)
 	require.NoError(t, err)
@@ -150,23 +170,28 @@ func liveExecCommandCalls(t *testing.T, source, function string) []ast.CallExpr 
 		if !ok || declaration.Name.Name != function {
 			continue
 		}
-		ast.Inspect(declaration.Body, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
+		for _, statement := range declaration.Body.List {
+			assignment, ok := statement.(*ast.AssignStmt)
+			if !ok || len(assignment.Rhs) != 1 {
+				continue
 			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || selector.Sel.Name != "execCommand" {
-				return true
+			call, ok := assignment.Rhs[0].(*ast.CallExpr)
+			if !ok || !isExecCommandCall(call) {
+				continue
 			}
-			receiver, ok := selector.X.(*ast.Ident)
-			if ok && receiver.Name == "s" {
-				calls = append(calls, *call)
-			}
-			return true
-		})
+			calls = append(calls, *call)
+		}
 	}
 	return calls
+}
+
+func isExecCommandCall(call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "execCommand" {
+		return false
+	}
+	receiver, ok := selector.X.(*ast.Ident)
+	return ok && receiver.Name == "s"
 }
 
 func callArguments(calls []ast.CallExpr) [][]string {

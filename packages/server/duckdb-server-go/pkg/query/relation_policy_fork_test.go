@@ -103,7 +103,7 @@ func TestMirrorBindingVerifierPinsVersionAndPrefixOnGuardedConnection(t *testing
 
 	conn, err := connector.Connect(t.Context())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { require.NoError(t, conn.Close()) }()
 	execer, ok := conn.(driver.ExecerContext)
 	require.True(t, ok)
 	_, err = execer.ExecContext(t.Context(), `UPDATE bqsync_internal.mirror_state SET prefix = 'stale-prefix' WHERE import_id = 'mirror-1'`, nil)
@@ -132,7 +132,7 @@ func TestMirrorBindingVerifierRejectsAdditionalBaseRelationInView(t *testing.T) 
 
 	conn, err := connector.Connect(t.Context())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { require.NoError(t, conn.Close()) }()
 	execer, ok := conn.(driver.ExecerContext)
 	require.True(t, ok)
 	_, err = execer.ExecContext(t.Context(), fmt.Sprintf(`CREATE TABLE analytics.secret_orders AS SELECT 90210 AS id; CREATE OR REPLACE VIEW analytics.orders AS SELECT * FROM read_parquet(%s) UNION ALL SELECT * FROM analytics.secret_orders`, quoteLiteral(filepath.Join(prefix, "*.parquet"))), nil)

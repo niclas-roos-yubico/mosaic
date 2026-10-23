@@ -250,11 +250,12 @@ func (v *relationPolicyValidator) CheckNode(node map[string]any, keyStack []stri
 			v.ctes[key] = struct{}{}
 		}
 	}
-	if node["type"] == "BASE_TABLE" {
+	switch node["type"] {
+	case "BASE_TABLE":
 		schema, _ := node["schema_name"].(string)
 		table, _ := node["table_name"].(string)
 		v.refs[tableRef{SchemaName: strings.TrimPrefix(schema, "schema_name:"), TableName: table}] = struct{}{}
-	} else if node["type"] == "SHOW_REF" {
+	case "SHOW_REF":
 		if _, nested := node["query"]; !nested {
 			v.errs = append(v.errs, fmt.Errorf("%w: catalog metadata statements are not permitted by a relation policy", ErrAccessDenied))
 		}

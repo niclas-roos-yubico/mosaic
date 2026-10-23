@@ -199,7 +199,7 @@ func TestBinaryStrictDatasetPolicyRejectsLegacySchemaSession(t *testing.T) {
 	req.Header.Set("X-Platform-Session", token)
 	resp, err = client.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { require.NoError(t, resp.Body.Close()) }()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 

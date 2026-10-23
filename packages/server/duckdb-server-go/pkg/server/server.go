@@ -282,7 +282,6 @@ func (s *handler) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]: the policy-aware call below retains this expiry-bound execution hook.
 	response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy) // FORK[http-expiry-context]: bound every executor path by authorization expiry.
 	if err != nil {
 		s.writeHTTPError(w, err)

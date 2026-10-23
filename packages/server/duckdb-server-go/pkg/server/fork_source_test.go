@@ -2,6 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"regexp"
 	"strings"
@@ -71,14 +74,10 @@ var pkgServerHookCode = []struct {
 		"a handler derives allowed schemas from request headers instead of the validated session JWT"},
 	{"server.go", "ws-session-bounds", "s.beginWebSocketSession(", 1,
 		"the websocket session's expiry close, query deadline and single-source close"},
-	{"server.go", "ws-message-query-ctx", "s.execCommand(queryCtx,", 2,
-		"command execution is bounded by the plain network ctx, so a query outlives the session expiry"},
 	{"server.go", "http-expiry-context", "contextForResolution(r.Context(), resolution.ExpiresAt)", 1,
 		"HTTP body decoding and command execution outlive the resolved authorization expiry"},
 	{"server.go", "http-expiry-context", "decodeHTTPParams(r.Context(), w, body, &params, resolution.ExpiresAt)", 1,
 		"HTTP body decoding ignores the resolved authorization expiry"},
-	{"server.go", "http-expiry-context", "response, err := s.execCommand(queryCtx, params, allowedSchemas, authorize) // FORK[http-expiry-context]", 1,
-		"HTTP command execution ignores the resolved authorization expiry"},
 	{"server.go", "http-expiry-context", "resolutionExpired(resolution.ExpiresAt)", 2,
 		"HTTP can execute after expiry or return a result completed after expiry"},
 	{"server.go", "exec-schema-policy-gate", "if s.schemaResolver != nil {", 1,
@@ -116,6 +115,79 @@ func TestPkgServerRetainsLoadBearingHookCode(t *testing.T) {
 			"%s has %d occurrences of %s, expected %d: the %q hook is gone and with it %s. "+
 				"Restore the call -- do not adjust this expectation to make the test green",
 			hook.file, got, hook.code, hook.count, hook.slug, hook.lost)
+	}
+}
+
+func TestPkgServerRetainsLiveExpiryBoundExecutions(t *testing.T) {
+	source := readForkSource(t, "server.go")
+
+	websocket := liveExecCommandCalls(t, source, "handleWebSocketMessage")
+	require.Equal(t, [][]string{{"queryCtx", "params", "allowedSchemas", "authorize"}}, callArguments(websocket),
+		"the WebSocket executor must receive the expiry-bounded query context")
+
+	http := liveExecCommandCalls(t, source, "handleHTTP")
+	require.Equal(t, [][]string{{"queryCtx", "params", "allowedSchemas", "authorize", "resolution.RelationPolicy"}}, callArguments(http),
+		"the HTTP executor must receive the expiry-bounded context and relation policy")
+}
+
+func TestLiveExecCommandCallsIgnoreComments(t *testing.T) {
+	const source = `package server
+func (s *handler) handleHTTP() {
+	// s.execCommand(queryCtx, params, allowedSchemas, authorize, resolution.RelationPolicy)
+}`
+	require.Empty(t, liveExecCommandCalls(t, source, "handleHTTP"),
+		"a commented execution call must not satisfy the source guard")
+}
+
+func liveExecCommandCalls(t *testing.T, source, function string) []ast.CallExpr {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "server.go", source, 0)
+	require.NoError(t, err)
+
+	var calls []ast.CallExpr
+	for _, declaration := range file.Decls {
+		declaration, ok := declaration.(*ast.FuncDecl)
+		if !ok || declaration.Name.Name != function {
+			continue
+		}
+		ast.Inspect(declaration.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "execCommand" {
+				return true
+			}
+			receiver, ok := selector.X.(*ast.Ident)
+			if ok && receiver.Name == "s" {
+				calls = append(calls, *call)
+			}
+			return true
+		})
+	}
+	return calls
+}
+
+func callArguments(calls []ast.CallExpr) [][]string {
+	arguments := make([][]string, len(calls))
+	for index, call := range calls {
+		arguments[index] = make([]string, len(call.Args))
+		for argument, expression := range call.Args {
+			arguments[index][argument] = expressionPath(expression)
+		}
+	}
+	return arguments
+}
+
+func expressionPath(expression ast.Expr) string {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression.Name
+	case *ast.SelectorExpr:
+		return expressionPath(expression.X) + "." + expression.Sel.Name
+	default:
+		return ""
 	}
 }
 
